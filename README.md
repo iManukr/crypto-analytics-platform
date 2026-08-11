@@ -1,5 +1,7 @@
 # Real-Time Ethereum Price Tracker
 
+![Real-time ETH dashboard](assets/dashboard.png)
+
 A streaming data pipeline that ingests live Ethereum (ETH/USD) 1-minute candles
 from Binance, moves them through Kafka, stores them in PostgreSQL, and visualises
 them live on a Grafana dashboard.
