@@ -25,7 +25,10 @@ Binance API ──▶ producer.py ──▶ Aiven Kafka ──▶ consumer.py �
 - **Consumer** reads each message, parses it, and upserts it into Postgres.
   It commits **Postgres first, the Kafka offset second**, so a crash can only ever
   cause a harmless re-insert — never data loss. The upsert is idempotent on
-  `(symbol, open_time)`.
+  `(symbol, open_time)`. If it is evicted from the consumer group (network drop,
+  laptop sleep) it rejoins automatically instead of exiting.
+- **FX updater** — a daemon thread inside the consumer refreshes the USD→KES rate
+  into `crypto.fx_rates` on its own timer, so the KES panels are never hardcoded.
 - **Grafana** reads directly from Postgres and renders live price, volume, 24h
   high/low, and per-minute price change.
 
@@ -83,9 +86,22 @@ CREATE TABLE IF NOT EXISTS crypto.market_candles_1m (
     taker_buy_quote  numeric(30,8),
     PRIMARY KEY (symbol, open_time)   -- makes the upsert idempotent
 );
+
+CREATE TABLE IF NOT EXISTS crypto.fx_rates (
+    base        varchar(10)   NOT NULL,
+    quote       varchar(10)   NOT NULL,
+    rate        numeric(20,8) NOT NULL,
+    as_of       timestamptz   NOT NULL,   -- when the PROVIDER published it
+    fetched_at  timestamptz   NOT NULL DEFAULT now(),
+    source      text,
+    PRIMARY KEY (base, quote, as_of)      -- re-fetching the same rate is a no-op
+);
 ```
 
-The consumer creates this automatically on first run.
+The consumer creates both automatically on first run.
+
+`as_of` is the provider's publish time, not ours — so the table keeps one row per
+published rate rather than one per poll, and history stays queryable.
 
 ---
 
@@ -130,6 +146,11 @@ KAFKA_CA=certificates/ca.pem
 
 # Symbol
 SYMBOL=ETHUSDT
+
+# FX leg (all optional — these are the defaults)
+FX_BASE=USD
+FX_QUOTE=KES
+FX_REFRESH_SEC=900
 
 # Postgres (Aiven) — paste the Service URI from the console
 PG_DSN=postgres://avnadmin:PASSWORD@pg-XXXX-yourproject.h.aivencloud.com:PORT/defaultdb?sslmode=require
@@ -197,7 +218,7 @@ Panels included:
 | Panel                  | Query summary                                  |
 |------------------------|------------------------------------------------|
 | ETH Price (USD)        | latest `close_price`                            |
-| ETH Price (KES)        | latest `close_price × FX rate`                  |
+| ETH Price (KES)        | latest `close_price ×` live rate from `fx_rates` |
 | Live Price (latest)    | most recent candle row                          |
 | ETH/USD (time-filtered)| `close_price` over the dashboard time range     |
 | Volume                 | `volume` over range                             |
@@ -205,6 +226,57 @@ Panels included:
 | 24h High / 24h Low     | `max(high_price)` / `min(low_price)` over 24h   |
 
 Dashboard defaults to a 30-minute window with 30s auto-refresh.
+
+### KES panels (live FX rate)
+
+Replace any hardcoded multiplier (e.g. `close_price * 129.01`) with a join onto
+`crypto.fx_rates`.
+
+**Stat panel — ETH Price (KES)** (Format: **Table**):
+
+```sql
+SELECT c.close_price * f.rate AS "ETH (KES)"
+FROM crypto.market_candles_1m c
+CROSS JOIN LATERAL (
+    SELECT rate FROM crypto.fx_rates
+    WHERE base = 'USD' AND quote = 'KES'
+    ORDER BY as_of DESC LIMIT 1
+) f
+WHERE c.symbol = 'ETHUSDT'
+ORDER BY c.open_time DESC
+LIMIT 1;
+```
+
+**Time-series panel — ETH/KES over the dashboard range** (Format: **Time series**).
+The lateral join picks the rate that was in effect *at each candle*, so history
+isn't retroactively repriced at today's rate; the `COALESCE` falls back to the
+earliest known rate for candles older than your first FX row:
+
+```sql
+SELECT c.open_time AS "time",
+       c.close_price * COALESCE(f.rate, e.rate) AS "ETH/KES"
+FROM crypto.market_candles_1m c
+LEFT JOIN LATERAL (
+    SELECT rate FROM crypto.fx_rates
+    WHERE base = 'USD' AND quote = 'KES' AND as_of <= c.open_time
+    ORDER BY as_of DESC LIMIT 1
+) f ON true
+CROSS JOIN LATERAL (
+    SELECT rate FROM crypto.fx_rates
+    WHERE base = 'USD' AND quote = 'KES'
+    ORDER BY as_of LIMIT 1
+) e
+WHERE c.symbol = 'ETHUSDT' AND $__timeFilter(c.open_time)
+ORDER BY c.open_time;
+```
+
+> **How "live" the FX leg really is:** the free keyless providers
+> (`open.er-api.com`, with `fawazahmed0/currency-api` as fallback) publish
+> **once per day**. So the KES figure moves minute-to-minute because *ETH* moves,
+> while the FX leg steps once a day. That is still far better than a frozen
+> constant — 129.01 had already drifted to 129.34 (~KES 627 per ETH). Genuine
+> tick-by-tick FX needs a paid feed; swap `fetch_fx_rate()` in `consumer.py` and
+> nothing else changes.
 
 **Tips**
 - Stat panels (single value) must use **Format: Table**; time-series panels use
