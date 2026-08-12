@@ -219,6 +219,7 @@ Panels included:
 |------------------------|------------------------------------------------|
 | ETH Price (USD)        | latest `close_price`                            |
 | ETH Price (KES)        | latest `close_price ×` live rate from `fx_rates` |
+| USD/KES rate           | the live rate itself, so you can see it move    |
 | Live Price (latest)    | most recent candle row                          |
 | ETH/USD (time-filtered)| `close_price` over the dashboard time range     |
 | Volume                 | `volume` over range                             |
