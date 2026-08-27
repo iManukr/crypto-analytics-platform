@@ -92,8 +92,8 @@ Full explanation in [docs/DESIGN.md](docs/DESIGN.md).
 available to Docker. Nothing else — no local Python, no local database.
 
 ```bash
-git clone https://github.com/Manu-Rotich/Kafka_project.git
-cd Kafka_project
+git clone https://github.com/iManukr/crypto-analytics-platform.git
+cd crypto-analytics-platform
 cp .env.example .env
 docker compose up -d
 ```
