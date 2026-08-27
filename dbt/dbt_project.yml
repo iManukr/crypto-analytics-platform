@@ -1,0 +1,66 @@
+name: crypto_analytics
+version: "1.0.0"
+config-version: 2
+
+profile: crypto_analytics
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+# Surfaced in every model as {{ var('...') }} so the same project runs against a
+# laptop and against a production cluster without editing SQL.
+vars:
+  # How far back an incremental run reprocesses. This is the answer to "how late
+  # can a CDC update arrive and still be picked up". Debezium normally delivers
+  # in under a second, but a connector that was down for an hour replays on
+  # restart, and the mart has to absorb that rather than skip it.
+  incremental_lookback_hours: 3
+
+  # Extra history fed into the window functions in ml_features_1m so that the
+  # longest lookback (60-minute moving average) is fully warmed up at the left
+  # edge of an incremental batch. Must exceed the longest window.
+  feature_warmup_hours: 6
+
+  # Rows older than this are excluded from the ML training mart, because the
+  # label for the most recent minute cannot be resolved yet.
+  label_horizon_minutes: 1
+
+  # Which currency pair the marts price into, alongside the native quote asset.
+  fx_base: "USD"
+  fx_quote: "KES"
+
+models:
+  crypto_analytics:
+    +on_schema_change: append_new_columns
+
+    staging:
+      # Views, not tables. Staging exists to clean, type and DEDUPLICATE the CDC
+      # landing tables; it holds no state of its own, so materialising it would
+      # only add a copy of the data and a second thing that can be stale.
+      # The FINAL dedup cost is bounded because every downstream mart pushes a
+      # partition-pruning predicate through the view.
+      +materialized: view
+      +schema: staging
+
+    marts:
+      +materialized: incremental
+      +schema: marts
+      # MergeTree everywhere in the marts: these are already deduplicated, so
+      # ReplacingMergeTree would add merge work for no benefit.
+      +engine: "MergeTree()"
+
+seeds:
+  crypto_analytics:
+    +schema: staging
+
+tests:
+  crypto_analytics:
+    # A failing test stops the DAG. `warn` would make the test decorative.
+    +severity: error
+    +store_failures: true
+    +schema: ops

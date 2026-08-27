@@ -1,0 +1,364 @@
+name: CI
+
+# =============================================================================
+# Continuous integration.
+#
+# The jobs are ordered by how fast they fail, not by how important they are.
+# Lint and unit tests finish in under a minute and catch most mistakes; the
+# transformation job takes ~2 minutes and validates every dbt model and test
+# against a real ClickHouse; the end-to-end job takes ~8 minutes and is the only
+# thing that can prove CDC actually works. Feedback arrives in that order, so a
+# broken formatting run does not wait behind a full stack boot.
+#
+# Everything here is hermetic. The end-to-end job runs with INGEST_SOURCE=replay
+# so a third-party API's availability - or a geo-block on the runner - can never
+# decide whether a pull request is mergeable.
+# =============================================================================
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push supersedes the previous run on the same branch. Running a full
+# stack boot for a commit nobody is waiting on any more is pure cost.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+
+  # ==========================================================================
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install tooling
+        run: pip install ruff==0.8.6 pyyaml==6.0.2
+
+      - name: Ruff lint
+        run: ruff check . --output-format=github
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Validate every YAML, JSON and XML config
+        # Catches the class of failure that otherwise only appears at container
+        # start: a malformed alert rule, dashboard or ClickHouse config.
+        run: python scripts/validate_configs.py
+
+  # ==========================================================================
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r ingestion/requirements.txt
+          pip install pytest==8.3.4 pytest-cov==6.0.0
+
+      - name: Run unit tests
+        run: pytest tests/unit -v --cov --cov-report=xml --cov-report=term-missing
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+          retention-days: 7
+
+  # ==========================================================================
+  dbt-build:
+    name: dbt models and data tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        ports: ["8123:8123", "9000:9000"]
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      CLICKHOUSE_HOST: localhost
+      CLICKHOUSE_HTTP_PORT: "8123"
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DB: analytics
+      DBT_TARGET: ci
+      # profiles.yml is committed inside dbt/ rather than left in ~/.dbt, so
+      # this must be an absolute path: the dbt steps run with
+      # working-directory: dbt, where a relative "dbt" would resolve to dbt/dbt.
+      DBT_PROFILES_DIR: ${{ github.workspace }}/dbt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dbt and fixtures tooling
+        run: |
+          pip install -r dbt/requirements.txt
+          pip install -r ingestion/requirements.txt
+
+      - name: Apply the production schema and seed deterministic fixtures
+        # Runs the same infra/clickhouse/init SQL the real container runs,
+        # skipping only the Kafka-engine files. Schema drift fails here.
+        run: python scripts/ci_seed_clickhouse.py
+
+      - name: dbt deps
+        working-directory: dbt
+        run: dbt deps --no-use-colors
+
+      - name: dbt parse
+        # Compiles every model without touching the warehouse: catches Jinja
+        # errors, bad refs and undefined macros in seconds.
+        working-directory: dbt
+        run: dbt parse --no-use-colors
+
+      - name: dbt build
+        # `build` interleaves models and their tests in DAG order, so a model
+        # whose test fails does not get built on top of.
+        working-directory: dbt
+        run: dbt build --no-use-colors --fail-fast
+
+      - name: Assert the marts are not vacuously empty
+        # Every dbt test passes trivially on zero rows. This is the guard
+        # against a green build over an empty warehouse.
+        run: |
+          set -euo pipefail
+          for table in \
+            analytics_staging.stg_market_candles \
+            analytics_marts.fct_candles_1m \
+            analytics_marts.agg_candles_5m \
+            analytics_marts.ml_features_1m \
+            analytics_marts.dim_symbol \
+            analytics_marts.fct_market_daily
+          do
+            count=$(curl -sf "http://localhost:8123/" --data-binary "SELECT count() FROM ${table}")
+            echo "${table}: ${count} rows"
+            if [ "${count}" -lt 1 ]; then
+              echo "::error::${table} is empty - the dbt tests passed on no data"
+              exit 1
+            fi
+          done
+
+      - name: Assert staging really deduplicated the replayed CDC events
+        # The fixture deliberately contains 50 replayed rows. If FINAL were
+        # removed from staging, this is what would catch it.
+        run: |
+          set -euo pipefail
+          total=$(curl -sf "http://localhost:8123/" --data-binary \
+            "SELECT count() FROM analytics_staging.stg_market_candles")
+          distinct=$(curl -sf "http://localhost:8123/" --data-binary \
+            "SELECT count() FROM (SELECT DISTINCT symbol, open_time FROM analytics_staging.stg_market_candles)")
+          echo "staging rows=${total} distinct keys=${distinct}"
+          [ "${total}" = "${distinct}" ] || { echo "::error::staging contains duplicates"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dbt-artifacts
+          path: |
+            dbt/target/run_results.json
+            dbt/target/manifest.json
+            dbt/logs/
+          retention-days: 7
+
+  # ==========================================================================
+  build-images:
+    name: Build container images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ingestion
+            dockerfile: ingestion/Dockerfile
+          - name: exporter
+            dockerfile: exporter/Dockerfile
+          - name: airflow
+            dockerfile: airflow/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          tags: crypto-analytics/${{ matrix.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # ==========================================================================
+  end-to-end:
+    name: End-to-end pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Only worth eight minutes of runner time once the cheap checks are green.
+    needs: [lint, unit-tests, dbt-build]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: pip install -r ingestion/requirements.txt pytest==8.3.4
+
+      - name: Create .env
+        run: cp .env.example .env
+
+      - name: Start the full stack
+        # The exact command a reviewer runs, plus the CI overlay that swaps the
+        # external API for the deterministic offline generator.
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build
+
+      - name: Wait for the stack to converge
+        env:
+          STACK_WAIT_TIMEOUT: "600"
+        run: bash scripts/wait_for_stack.sh
+
+      - name: Validate every stage received data
+        run: bash scripts/validate_stage.sh all
+
+      - name: Run the transformation DAG
+        run: |
+          set -euo pipefail
+          docker compose exec -T airflow-scheduler \
+            airflow dags trigger crypto_analytics_pipeline
+          echo "waiting for the DAG run to finish ..."
+          for i in $(seq 1 60); do
+            state=$(docker compose exec -T airflow-scheduler \
+              airflow dags list-runs -d crypto_analytics_pipeline -o plain \
+              | awk 'NR==2 {print $3}')
+            echo "  attempt ${i}: state=${state:-unknown}"
+            case "${state:-}" in
+              success) echo "DAG run succeeded"; exit 0 ;;
+              failed)  echo "::error::the DAG run failed"; exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "::error::the DAG run did not finish within 15 minutes"
+          exit 1
+
+      - name: Validate the marts after transformation
+        run: bash scripts/validate_stage.sh marts
+
+      - name: Run the integration test suite
+        env:
+          POSTGRES_HOST: localhost
+          CLICKHOUSE_HOST: localhost
+          TEST_CDC_TIMEOUT: "180"
+        run: pytest tests/integration -v
+
+      - name: Dump diagnostics
+        # Runs on failure only. A red CI job with no logs costs more time than
+        # the failure itself.
+        if: failure()
+        run: |
+          echo "===== container status ====="
+          docker compose ps -a
+          echo "===== connector status ====="
+          curl -s http://localhost:8083/connectors/crypto-oltp-cdc/status | python -m json.tool || true
+          for service in ingestion connect clickhouse kafka airflow-scheduler exporter postgres; do
+            echo "===== logs: ${service} ====="
+            docker compose logs --tail=120 "${service}" 2>&1 || true
+          done
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
+
+  # ==========================================================================
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan the filesystem for vulnerable dependencies and secrets
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          format: sarif
+          output: trivy.sarif
+          # The build must not go red for an unfixable transitive CVE in a base
+          # image; findings are still uploaded and reviewable in the Security
+          # tab. A hard gate here would train people to bypass the whole job.
+          exit-code: "0"
+          severity: CRITICAL,HIGH
+
+      - name: Upload findings
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+
+  # ==========================================================================
+  # A single job for branch protection to require, so adding a job later does
+  # not mean re-editing the protection rule.
+  ci-passed:
+    name: CI passed
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [lint, unit-tests, dbt-build, build-images, end-to-end, security]
+    steps:
+      - name: Check that no required job failed
+        run: |
+          echo "lint:        ${{ needs.lint.result }}"
+          echo "unit-tests:  ${{ needs.unit-tests.result }}"
+          echo "dbt-build:   ${{ needs.dbt-build.result }}"
+          echo "build:       ${{ needs.build-images.result }}"
+          echo "end-to-end:  ${{ needs.end-to-end.result }}"
+          echo "security:    ${{ needs.security.result }}"
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "::error::at least one CI job did not succeed"
+            exit 1
+          fi

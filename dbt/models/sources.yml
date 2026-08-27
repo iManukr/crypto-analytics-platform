@@ -1,0 +1,61 @@
+version: 2
+
+sources:
+  - name: cdc
+    description: >
+      CDC landing zone in ClickHouse. Written exclusively by the Kafka-engine
+      materialized views defined in infra/clickhouse/init - dbt never writes
+      here, it only reads. Rows are ReplacingMergeTree-deduplicated on the
+      Postgres LSN, so every read from this layer must either use FINAL or an
+      explicit argMax; the staging models do the former, once, so that no
+      downstream model has to remember.
+    database: raw
+    schema: raw
+
+    # Source freshness is checked by `dbt source freshness` in the Airflow DAG.
+    # It is the earliest possible detection point for "CDC has stopped": it
+    # fires whether the cause is the ingester, Postgres, Debezium, Kafka or
+    # ClickHouse, because all of them show up as the same symptom here.
+    loaded_at_field: _cdc_arrived_at
+    freshness:
+      warn_after: {count: 5, period: minute}
+      error_after: {count: 15, period: minute}
+
+    tables:
+      - name: market_candles_1m
+        description: >
+          Raw CDC stream of 1-minute OHLCV bars. One row per Debezium change
+          event, including tombstones (_op = 'd') and snapshot reads
+          (_op = 'r'). Duplicates are expected here and are not a defect.
+        columns:
+          - name: symbol
+            description: Trading pair, e.g. ETHUSDT. Foreign key to raw.symbols.
+          - name: open_time
+            description: Start of the minute the bar covers, UTC.
+          - name: _op
+            description: "Debezium operation: c=create, u=update, d=delete, r=snapshot read."
+          - name: _lsn
+            description: Postgres log sequence number; the ReplacingMergeTree version column.
+          - name: _source_ts_ms
+            description: Postgres commit time in epoch ms. Paired with _cdc_arrived_at this gives true end-to-end CDC lag.
+          - name: _cdc_arrived_at
+            description: Wall-clock time ClickHouse materialised the row.
+
+      - name: symbols
+        description: Reference dimension for tradable pairs, replicated from crypto.symbols.
+        freshness: null  # Changes rarely by design; a stale dimension is not an incident.
+
+      - name: fx_rates
+        description: >
+          FX rate history. Postgres holds only the current value per pair, but
+          this table is ordered by (base, quote, as_of), so ClickHouse retains
+          one row per published rate and point-in-time joins are possible.
+        freshness:
+          warn_after: {count: 36, period: hour}
+          error_after: {count: 72, period: hour}
+
+      - name: cdc_dead_letters
+        description: >
+          Messages the Kafka engines could not parse. Any row here is a defect;
+          Prometheus alerts on a non-zero count.
+        freshness: null

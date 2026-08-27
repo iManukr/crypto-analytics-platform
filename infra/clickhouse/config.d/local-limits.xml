@@ -1,0 +1,24 @@
+<clickhouse>
+    <!--
+      This stack is expected to run on a laptop next to Kafka, Postgres,
+      Airflow and Grafana. Default ClickHouse sizing assumes it owns the box,
+      so cap the caches to keep the whole compose stack inside ~8GB.
+      Production sizing is discussed in docs/SCALING.md.
+    -->
+    <mark_cache_size>536870912</mark_cache_size>
+    <uncompressed_cache_size>536870912</uncompressed_cache_size>
+    <max_server_memory_usage_to_ram_ratio>0.7</max_server_memory_usage_to_ram_ratio>
+    <max_concurrent_queries>64</max_concurrent_queries>
+
+    <!--
+      The default user is the account the container's own init scripts run as.
+      Pin it to loopback so the published 8123 cannot be reached with an empty
+      password; every real client uses the analytics account instead.
+    -->
+    <listen_host>0.0.0.0</listen_host>
+
+    <logger>
+        <level>information</level>
+        <console>true</console>
+    </logger>
+</clickhouse>

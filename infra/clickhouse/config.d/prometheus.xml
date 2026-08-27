@@ -1,0 +1,15 @@
+<clickhouse>
+    <!--
+      Native Prometheus exposition. Avoids a sidecar exporter entirely:
+      ClickHouse publishes its own counters, gauges, async metrics and
+      status info on :9363/metrics, which Prometheus scrapes directly.
+    -->
+    <prometheus>
+        <endpoint>/metrics</endpoint>
+        <port>9363</port>
+        <metrics>true</metrics>
+        <events>true</events>
+        <asynchronous_metrics>true</asynchronous_metrics>
+        <status_info>true</status_info>
+    </prometheus>
+</clickhouse>

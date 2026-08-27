@@ -1,0 +1,29 @@
+<clickhouse>
+    <users>
+        <default>
+            <!-- Loopback only: this account has no password and exists so the
+                 container's own bootstrap scripts can run. Every client that
+                 reaches ClickHouse over the network uses the analytics account,
+                 created by 00-create-user.sh from .env. -->
+            <networks>
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
+        </default>
+    </users>
+
+    <profiles>
+        <analytics_profile>
+            <max_memory_usage>4000000000</max_memory_usage>
+            <max_execution_time>300</max_execution_time>
+            <max_threads>4</max_threads>
+            <!-- FINAL is on the hot path for every staging view. Restricting the
+                 merge to within a partition makes it dramatically cheaper, and
+                 is safe here because the dedup key never spans partitions: the
+                 partition expression is derived from open_time, which is itself
+                 part of ORDER BY. -->
+            <do_not_merge_across_partitions_select_final>1</do_not_merge_across_partitions_select_final>
+            <optimize_move_to_prewhere>1</optimize_move_to_prewhere>
+        </analytics_profile>
+    </profiles>
+</clickhouse>

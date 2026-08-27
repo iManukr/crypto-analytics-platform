@@ -1,0 +1,515 @@
+# =============================================================================
+# crypto-analytics-platform - full stack
+#
+#   docker compose up -d
+#
+# is the only command needed. Every dependency is expressed with a healthcheck
+# and `condition: service_healthy`, so services start in the right order and
+# converge without a sleep anywhere in this file.
+#
+# Startup order, for reference:
+#   postgres ─┬─▶ kafka ──▶ connect ──▶ connect-init  (registers the CDC connector)
+#             ├─▶ clickhouse (creates raw/staging/mart DBs, Kafka engines, MVs)
+#             ├─▶ ingestion  (starts filling the OLTP tables immediately)
+#             └─▶ airflow-init ──▶ airflow-scheduler + airflow-webserver
+#   prometheus/grafana/exporters attach to whatever is up and stay up.
+#
+# Optional container-level resource metrics:
+#   docker compose --profile full up -d      (adds cAdvisor)
+# =============================================================================
+
+name: crypto-analytics
+
+# --------------------------------------------------------------------- anchors
+x-clickhouse-env: &clickhouse-env
+  CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse}
+  CLICKHOUSE_HTTP_PORT: ${CLICKHOUSE_HTTP_PORT:-8123}
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_pw}
+  CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
+
+x-postgres-env: &postgres-env
+  POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+  POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+  POSTGRES_DB: ${POSTGRES_DB:-crypto}
+  POSTGRES_USER: ${POSTGRES_USER:-crypto_app}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto_app_pw}
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+  image: crypto-analytics/airflow:latest
+  environment: &airflow-env
+    <<: [*clickhouse-env, *postgres-env]
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
+      postgresql+psycopg2://${AIRFLOW_METADATA_USER:-airflow}:${AIRFLOW_METADATA_PASSWORD:-airflow_pw}@postgres:5432/${AIRFLOW_METADATA_DB:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-UKMzEm3yIuFYEq3y3-2rvZWUD_qMkFhOZ1t2Vd0kkPI=}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__PARALLELISM: "8"
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "4"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    # Pinned rather than auto-generated: scheduler and webserver must agree on
+    # it, and an auto-generated key differs per container, which invalidates
+    # every session on restart.
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-local-dev-not-a-secret}
+    AIRFLOW__WEBSERVER__WARN_DEPLOYMENT_EXPOSURE: "false"
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "30"
+    # StatsD -> statsd-exporter -> Prometheus. This is how DAG and task metrics
+    # reach the observability stack; the mapping that keeps label cardinality
+    # bounded lives in infra/statsd/statsd-mapping.yml.
+    AIRFLOW__METRICS__STATSD_ON: "true"
+    AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
+    AIRFLOW__METRICS__STATSD_PORT: "9125"
+    AIRFLOW__METRICS__STATSD_PREFIX: airflow
+    PYTHONPATH: /opt/airflow:/opt/airflow/dags
+    DBT_PROJECT_DIR: /opt/airflow/dbt
+    DBT_PROFILES_DIR: /opt/airflow/dbt
+    DBT_TARGET: dev
+    KAFKA_CONNECT_URL: ${KAFKA_CONNECT_URL:-http://connect:8083}
+    CDC_LAG_SLA_SECONDS: ${CDC_LAG_SLA_SECONDS:-120}
+    FRESHNESS_SLA_SECONDS: ${FRESHNESS_SLA_SECONDS:-300}
+    AIRFLOW_SCHEDULE_CRON: ${AIRFLOW_SCHEDULE_CRON:-*/15 * * * *}
+    INGEST_SOURCE: ${INGEST_SOURCE:-binance}
+    BINANCE_HOSTS: ${BINANCE_HOSTS:-https://api.binance.com}
+    SYMBOLS: ${SYMBOLS:-ETHUSDT,BTCUSDT}
+    BACKFILL_MINUTES: ${BACKFILL_MINUTES:-180}
+    FX_BASE: ${FX_BASE:-USD}
+    FX_QUOTE: ${FX_QUOTE:-KES}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./dbt:/opt/airflow/dbt
+    - ./ingestion:/opt/airflow/ingestion
+    - airflow-logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  networks: [pipeline]
+
+# ------------------------------------------------------------------- services
+services:
+
+  # ==========================================================================
+  # OLTP - the system of record. Also hosts Airflow's metadata database, in a
+  # separate database that is deliberately NOT in the CDC publication.
+  # ==========================================================================
+  postgres:
+    image: postgres:16
+    container_name: crypto-postgres
+    restart: unless-stopped
+    command:
+      # wal_level=logical is the one setting without which none of this works:
+      # it makes Postgres write enough detail into the WAL for logical decoding.
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_replication_slots=10"
+      # Bounds WAL retention for a slot that stops being consumed. Without it, a
+      # dead Debezium connector eventually fills the disk and takes the source
+      # database down. With it, Postgres invalidates the slot instead - CDC
+      # breaks loudly and needs a resnapshot, which is far better than an outage.
+      - "-c"
+      - "max_slot_wal_keep_size=2GB"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "max_connections=200"
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-postgres_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-crypto}
+      APP_USER: ${POSTGRES_USER:-crypto_app}
+      APP_PASSWORD: ${POSTGRES_PASSWORD:-crypto_app_pw}
+      DBZ_USER: ${DEBEZIUM_USER:-debezium}
+      DBZ_PASSWORD: ${DEBEZIUM_PASSWORD:-debezium_pw}
+      AIRFLOW_METADATA_DB: ${AIRFLOW_METADATA_DB:-airflow}
+      AIRFLOW_METADATA_USER: ${AIRFLOW_METADATA_USER:-airflow}
+      AIRFLOW_METADATA_PASSWORD: ${AIRFLOW_METADATA_PASSWORD:-airflow_pw}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PUBLISHED_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPERUSER:-postgres} -d ${POSTGRES_DB:-crypto}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks: [pipeline]
+
+  # ==========================================================================
+  # Kafka in KRaft mode - one process, no ZooKeeper. Halves the container count
+  # and removes an entire class of "the broker is up but ZK is not" failures.
+  # ==========================================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: crypto-kafka
+    restart: unless-stopped
+    environment:
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-Nk2ROnZ1RtSAKBGpJmXqEw}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
+      KAFKA_LISTENERS: "PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092"
+      # Two listeners on purpose: containers reach the broker as kafka:29092,
+      # tools on the host reach it as localhost:9092. A single advertised
+      # listener cannot satisfy both, and getting this wrong is the single most
+      # common Kafka-in-Docker failure.
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:${KAFKA_PUBLISHED_PORT:-9092}"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: kafka
+    ports:
+      - "${KAFKA_PUBLISHED_PORT:-9092}:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:29092 --list > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks: [pipeline]
+
+  # ==========================================================================
+  # Debezium - Kafka Connect with the Postgres connector.
+  # ==========================================================================
+  connect:
+    image: debezium/connect:2.7.3.Final
+    container_name: crypto-connect
+    restart: unless-stopped
+    depends_on:
+      kafka: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: crypto-connect-cluster
+      CONFIG_STORAGE_TOPIC: _connect_configs
+      OFFSET_STORAGE_TOPIC: _connect_offsets
+      STATUS_STORAGE_TOPIC: _connect_status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      # Offset flush cadence. Shorter means less duplicate replay after a crash,
+      # at the cost of more writes to the offsets topic.
+      OFFSET_FLUSH_INTERVAL_MS: 10000
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      KAFKA_HEAP_OPTS: "-Xms256M -Xmx1G"
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 45s
+    networks: [pipeline]
+
+  # Registers (or updates) the CDC connector, then exits. PUT on the connector
+  # config is create-or-update, so this converges on every `compose up` rather
+  # than failing with a 409 the second time.
+  connect-init:
+    image: python:3.11-slim
+    container_name: crypto-connect-init
+    restart: on-failure
+    depends_on:
+      connect: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    environment:
+      <<: *postgres-env
+      DEBEZIUM_USER: ${DEBEZIUM_USER:-debezium}
+      DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD:-debezium_pw}
+      CDC_TOPIC_PREFIX: ${CDC_TOPIC_PREFIX:-cdc}
+      KAFKA_CONNECT_URL: http://connect:8083
+      CONNECTOR_TEMPLATE: /opt/connect/debezium-postgres.json
+    volumes:
+      - ./scripts:/opt/scripts:ro
+      - ./infra/connect:/opt/connect:ro
+    command: ["python", "/opt/scripts/register_connector.py"]
+    networks: [pipeline]
+
+  # ==========================================================================
+  # OLAP. Init scripts create the raw/staging/mart databases, the Kafka engine
+  # tables and the materialized views that project the Debezium envelope.
+  # ==========================================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: crypto-clickhouse
+    restart: unless-stopped
+    depends_on:
+      kafka: {condition: service_healthy}
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_pw}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
+    ulimits:
+      # ClickHouse opens a file per column per part. The Docker default of 1024
+      # is exhausted quickly and surfaces as confusing "cannot open file" errors
+      # rather than as an obvious limit problem.
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./infra/clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - ./infra/clickhouse/users.d:/etc/clickhouse-server/users.d:ro
+      - ./infra/clickhouse/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${CLICKHOUSE_PUBLISHED_HTTP_PORT:-8123}:8123"
+      - "9000:9000"
+      - "${CLICKHOUSE_METRICS_PORT:-9363}:9363"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks: [pipeline]
+
+  # ==========================================================================
+  # Ingestion - public REST API into the OLTP layer. The low-latency path.
+  # ==========================================================================
+  ingestion:
+    build:
+      context: .
+      dockerfile: ingestion/Dockerfile
+    image: crypto-analytics/ingestion:latest
+    container_name: crypto-ingestion
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      <<: *postgres-env
+      INGEST_SOURCE: ${INGEST_SOURCE:-binance}
+      BINANCE_HOSTS: ${BINANCE_HOSTS:-https://api.binance.com,https://api-gcp.binance.com,https://api.binance.us}
+      SYMBOLS: ${SYMBOLS:-ETHUSDT,BTCUSDT}
+      INGEST_INTERVAL_SECONDS: ${INGEST_INTERVAL_SECONDS:-20}
+      BACKFILL_MINUTES: ${BACKFILL_MINUTES:-180}
+      INGEST_FALLBACK_AFTER_FAILURES: ${INGEST_FALLBACK_AFTER_FAILURES:-3}
+      FX_BASE: ${FX_BASE:-USD}
+      FX_QUOTE: ${FX_QUOTE:-KES}
+      FX_REFRESH_SECONDS: ${FX_REFRESH_SECONDS:-900}
+      INGESTION_METRICS_PORT: ${INGESTION_METRICS_PORT:-8000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${INGESTION_METRICS_PORT:-8000}:8000"
+    networks: [pipeline]
+
+  # ==========================================================================
+  # Orchestration
+  # ==========================================================================
+  airflow-init:
+    <<: *airflow-common
+    container_name: crypto-airflow-init
+    depends_on:
+      postgres: {condition: service_healthy}
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        echo "[airflow-init] migrating metadata database"
+        airflow db migrate
+        echo "[airflow-init] ensuring admin user"
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER:-admin}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD:-admin}" \
+          --firstname Data --lastname Platform \
+          --role Admin --email admin@example.com || true
+        echo "[airflow-init] done"
+    restart: on-failure
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: crypto-airflow-scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init: {condition: service_completed_successfully}
+      clickhouse: {condition: service_healthy}
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 20s
+      retries: 10
+      start_period: 60s
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: crypto-airflow-webserver
+    restart: unless-stopped
+    depends_on:
+      airflow-init: {condition: service_completed_successfully}
+    command: webserver
+    ports:
+      - "${AIRFLOW_PUBLISHED_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
+
+  # ==========================================================================
+  # Observability
+  # ==========================================================================
+
+  # The cross-system view: CDC lag measured from the rows, row parity, per-layer
+  # freshness. Nothing else in the stack can produce these, because no single
+  # system can see both sides.
+  exporter:
+    build:
+      context: .
+      dockerfile: exporter/Dockerfile
+    image: crypto-analytics/exporter:latest
+    container_name: crypto-exporter
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    environment:
+      <<: [*postgres-env, *clickhouse-env]
+      KAFKA_CONNECT_URL: ${KAFKA_CONNECT_URL:-http://connect:8083}
+      CDC_CONNECTOR_NAME: crypto-oltp-cdc
+      EXPORTER_PORT: ${EXPORTER_PORT:-9101}
+      EXPORTER_SCRAPE_INTERVAL: "15"
+    ports:
+      - "${EXPORTER_PORT:-9101}:9101"
+    networks: [pipeline]
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: crypto-postgres-exporter
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      # Connects as the application role, which was granted pg_monitor by the
+      # init script. A superuser connection would work too and is exactly the
+      # shortcut that ends up in production.
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-crypto_app}:${POSTGRES_PASSWORD:-crypto_app_pw}@postgres:5432/${POSTGRES_DB:-crypto}?sslmode=disable"
+      PG_EXPORTER_AUTO_DISCOVER_DATABASES: "false"
+    networks: [pipeline]
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    container_name: crypto-kafka-exporter
+    restart: unless-stopped
+    depends_on:
+      kafka: {condition: service_healthy}
+    command: ["--kafka.server=kafka:29092", "--web.listen-address=:9308"]
+    networks: [pipeline]
+
+  statsd-exporter:
+    image: prom/statsd-exporter:v0.27.1
+    container_name: crypto-statsd-exporter
+    restart: unless-stopped
+    command:
+      - "--statsd.mapping-config=/etc/statsd/statsd-mapping.yml"
+      - "--statsd.listen-udp=:9125"
+      - "--web.listen-address=:9102"
+    volumes:
+      - ./infra/statsd:/etc/statsd:ro
+    networks: [pipeline]
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: crypto-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      # Lets `curl -XPOST localhost:9090/-/reload` apply a rule change without a
+      # restart, which matters when you are iterating on an alert.
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./infra/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PUBLISHED_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    networks: [pipeline]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: crypto-grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus: {condition: service_healthy}
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Needs outbound network on FIRST boot only. If it fails, every dashboard
+      # in this repo still works - they are all built on Prometheus.
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_pw}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PUBLISHED_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+    networks: [pipeline]
+
+  # Container-level CPU/memory/IO. Behind a profile because it needs privileged
+  # host mounts that not every environment allows, and the stack must come up
+  # cleanly without it.
+  #   docker compose --profile full up -d
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: crypto-cadvisor
+    restart: unless-stopped
+    profiles: ["full"]
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8081:8080"
+    networks: [pipeline]
+
+networks:
+  pipeline:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  kafka-data:
+  clickhouse-data:
+  prometheus-data:
+  grafana-data:
+  airflow-logs:

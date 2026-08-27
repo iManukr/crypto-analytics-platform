@@ -1,0 +1,108 @@
+[project]
+name = "crypto-analytics-platform"
+version = "1.0.0"
+description = "End-to-end analytics engineering pipeline: public REST API -> Postgres -> Debezium/Kafka CDC -> ClickHouse -> dbt marts"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-cov==6.0.0",
+    "ruff==0.8.6",
+    "pyyaml==6.0.2",
+]
+
+# =============================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "scripts"]
+addopts = [
+    "-ra",
+    "--strict-markers",   # a typo'd marker fails instead of silently doing nothing
+    "--strict-config",
+]
+markers = [
+    "integration: requires the docker compose stack to be running (deselect with -m 'not integration')",
+]
+filterwarnings = [
+    "error::DeprecationWarning:ingestion.*",
+]
+
+# =============================================================================
+[tool.coverage.run]
+# Scoped to what the UNIT suite is actually responsible for. The other Python in
+# this repo is covered, but not here:
+#   * exporter/main.py         - asserted against a live stack by tests/integration
+#   * scripts/register_connector.py - its pure functions are unit-tested; the HTTP
+#                                registration loop runs for real as the
+#                                connect-init container in the end-to-end job
+#   * scripts/ci_seed_clickhouse.py - executed by the CI dbt-build job
+#   * scripts/validate_configs.py   - executed by the CI lint job
+# Measuring them here would report a number that says nothing about whether the
+# unit suite is adequate, and the honest way to fix a misleading metric is to
+# scope it correctly rather than to lower the threshold until it passes.
+source = ["ingestion"]
+branch = true
+omit = [
+    "*/__main__.py",
+    # The signal-handling service loop: covered by the end-to-end job, and a
+    # unit test of it would only assert that time.sleep was called.
+    "ingestion/__init__.py",
+]
+
+[tool.coverage.report]
+# Not set to 100. A coverage target that high makes people write tests for
+# getters instead of for the CDC seam that actually breaks. 80 is the level at
+# which an untested module is a deliberate decision rather than an oversight.
+fail_under = 80
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+# =============================================================================
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["legacy", ".venv", "dbt/target", "dbt/dbt_packages"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import sorting
+    "B",        # bugbear - the rules that catch real defects
+    "C4",       # comprehension clarity
+    "UP",       # pyupgrade
+    "S",        # bandit security checks
+    "RUF",
+]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "S101",    # assert: fine in tests, and used as an invariant elsewhere
+    "B008",    # function call in default argument - deliberate for injected clocks
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use hardcoded credentials against a local container, and
+# assert on private helpers to test degradation behaviour directly.
+"tests/**" = ["S105", "S106", "S311", "SLF001"]
+# The integration suite builds ClickHouse SQL with f-strings. ClickHouse's HTTP
+# interface takes no bind parameters, and every interpolated value is generated
+# by the test itself (a uuid4 suffix, a timestamp it just wrote). There is no
+# external input anywhere in this file.
+"tests/integration/**" = ["S608"]
+# Every query in the exporter is assembled from literals defined in the module
+# itself (table names from a hardcoded tuple, intervals from constants). Nothing
+# reaching this module comes from a request, a file or a user.
+"exporter/main.py" = ["S608"]
+# The DAG files are executed by Airflow's parser, which requires module-level
+# statements that would otherwise read as unused expressions.
+"airflow/dags/**" = ["B008"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

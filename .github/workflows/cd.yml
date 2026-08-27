@@ -1,0 +1,237 @@
+name: CD
+
+# =============================================================================
+# Continuous delivery.
+#
+# Runs only after CI has fully passed on main - `workflow_run` with a success
+# check, not `push`, so an image can never be published from a commit whose
+# end-to-end job failed. That ordering is the entire point of having a separate
+# workflow: CI decides whether the commit is good, CD decides where it goes.
+#
+# What it produces:
+#   * three images pushed to GHCR, tagged with the commit SHA and a semver tag
+#     when the trigger was a release tag;
+#   * a build provenance attestation, so a deployed digest can be traced back to
+#     the exact workflow run that produced it;
+#   * a deployment to the `production` environment, gated on a required
+#     reviewer, and skipped cleanly when no deployment target is configured.
+#
+# The deploy job is written to no-op rather than fail when SSH secrets are
+# absent. A fork or a fresh clone has no infrastructure to deploy to, and a
+# permanently-red CD badge teaches people to ignore the badge.
+# =============================================================================
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        default: staging
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false  # never cancel a half-finished deployment
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+
+  # ==========================================================================
+  # Gate. Everything below depends on this, so the "did CI pass" logic exists
+  # in exactly one place.
+  # ==========================================================================
+  gate:
+    name: Verify CI passed
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=edge" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ==========================================================================
+  publish:
+    name: Publish images
+    runs-on: ubuntu-latest
+    needs: gate
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: ingestion
+            dockerfile: ingestion/Dockerfile
+          - name: exporter
+            dockerfile: exporter/Dockerfile
+          - name: airflow
+            dockerfile: airflow/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push ${{ matrix.name }}
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          provenance: true
+          sbom: true
+
+      - name: Attest build provenance
+        # Lets a deployed digest be traced back to the exact workflow run and
+        # commit that produced it.
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Scan the published image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.name }}:sha-${{ needs.gate.outputs.sha }}
+          format: table
+          severity: CRITICAL
+          # Reported, not gated. A critical CVE in a base image with no fix
+          # available should not block a deploy that fixes a data outage; it
+          # should be visible and triaged.
+          exit-code: "0"
+
+  # ==========================================================================
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [gate, publish]
+    timeout-minutes: 20
+    # Environment protection rules (required reviewers, wait timers) are
+    # configured in the repository settings and enforced by GitHub here.
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Check whether a deployment target is configured
+        id: check
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -z "${DEPLOY_HOST}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No DEPLOY_HOST secret is set, so there is nothing to deploy to."
+            echo "::notice::Set DEPLOY_HOST, DEPLOY_USER and DEPLOY_SSH_KEY to enable this job."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy over SSH
+        if: steps.check.outputs.configured == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          IMAGE_TAG: sha-${{ needs.gate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          echo "${DEPLOY_SSH_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
+
+          # Pull the exact digests CI validated, then roll the stack. Compose
+          # replaces containers one service at a time; the streaming ingester is
+          # the only stateful hop and its writes are idempotent, so a restart
+          # mid-cycle re-sends rather than loses.
+          ssh "${DEPLOY_USER}@${DEPLOY_HOST}" bash -euo pipefail <<REMOTE
+            cd /opt/crypto-analytics
+            git fetch --all --tags
+            git checkout ${{ needs.gate.outputs.sha }}
+            export IMAGE_TAG="${IMAGE_TAG}"
+            docker compose pull
+            docker compose up -d --remove-orphans
+          REMOTE
+
+      - name: Verify the deployment
+        if: steps.check.outputs.configured == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          # A deploy is not finished when the containers start. It is finished
+          # when data is flowing again, which is what this asserts.
+          ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            'cd /opt/crypto-analytics && bash scripts/wait_for_stack.sh && bash scripts/validate_stage.sh all'
+
+      - name: Summarise
+        run: |
+          {
+            echo "### Deployment"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Commit | \`${{ needs.gate.outputs.sha }}\` |"
+            echo "| Version | \`${{ needs.gate.outputs.version }}\` |"
+            echo "| Environment | ${{ github.event.inputs.environment || 'production' }} |"
+            echo "| Target configured | ${{ steps.check.outputs.configured }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,104 @@
+# =============================================================================
+# Airflow StatsD -> Prometheus mapping.
+#
+# Airflow emits dotted StatsD names with the dag_id and task_id embedded in the
+# metric name itself. Left unmapped, statsd-exporter turns every one into a
+# separate metric name, and a few hundred tasks becomes a few hundred metrics
+# that no query can aggregate over.
+#
+# These rules pull the identifiers out of the name and into LABELS, which is
+# what makes `sum by (dag_id) (...)` possible. Task-level rules deliberately
+# come before DAG-level ones, because the first matching rule wins.
+#
+# The final catch-all keeps unmapped metrics visible rather than dropping them:
+# a metric you did not anticipate is still better than a blind spot.
+# =============================================================================
+mappings:
+
+  # ---- scheduler liveness ------------------------------------------------
+  - match: "airflow.scheduler_heartbeat"
+    name: "airflow_scheduler_heartbeat"
+    help: "Scheduler heartbeat counter. Flat means nothing is being scheduled."
+
+  - match: "airflow.scheduler.critical_section_duration"
+    name: "airflow_scheduler_critical_section_duration"
+
+  - match: "airflow.dag_processing.total_parse_time"
+    name: "airflow_dag_processing_total_parse_time"
+
+  - match: "airflow.dag_processing.import_errors"
+    name: "airflow_dag_processing_import_errors"
+    help: "DAG files that failed to import. Non-zero means a DAG is not running at all."
+
+  # ---- DAG run outcomes --------------------------------------------------
+  - match: "airflow.dagrun.duration.success.*"
+    name: "airflow_dagrun_duration_success"
+    labels:
+      dag_id: "$1"
+
+  - match: "airflow.dagrun.duration.failed.*"
+    name: "airflow_dagrun_duration_failed"
+    labels:
+      dag_id: "$1"
+
+  - match: "airflow.dagrun.schedule_delay.*"
+    name: "airflow_dagrun_schedule_delay"
+    labels:
+      dag_id: "$1"
+
+  # ---- task instance outcomes -------------------------------------------
+  - match: "airflow.ti.start.*.*"
+    name: "airflow_task_start"
+    labels:
+      dag_id: "$1"
+      task_id: "$2"
+
+  - match: "airflow.ti.finish.*.*.*"
+    name: "airflow_task_finish"
+    labels:
+      dag_id: "$1"
+      task_id: "$2"
+      state: "$3"
+
+  - match: "airflow.dag.*.*.duration"
+    name: "airflow_task_duration"
+    labels:
+      dag_id: "$1"
+      task_id: "$2"
+
+  - match: "airflow.ti_failures"
+    name: "airflow_task_failures_total"
+
+  - match: "airflow.ti_successes"
+    name: "airflow_task_successes_total"
+
+  - match: "airflow.operator_failures_*"
+    name: "airflow_operator_failures"
+    labels:
+      operator: "$1"
+
+  # ---- pool / executor pressure -----------------------------------------
+  - match: "airflow.pool.open_slots.*"
+    name: "airflow_pool_open_slots"
+    labels:
+      pool: "$1"
+
+  - match: "airflow.pool.queued_slots.*"
+    name: "airflow_pool_queued_slots"
+    labels:
+      pool: "$1"
+
+  - match: "airflow.executor.open_slots"
+    name: "airflow_executor_open_slots"
+
+  - match: "airflow.executor.queued_tasks"
+    name: "airflow_executor_queued_tasks"
+
+  - match: "airflow.executor.running_tasks"
+    name: "airflow_executor_running_tasks"
+
+  # No catch-all rule is defined on purpose. statsd-exporter's default for an
+  # unmatched metric is already to expose it with dots converted to
+  # underscores, so a rule here would add nothing except another way for the
+  # mapping to be wrong. Unmapped metrics stay visible; they just cannot be
+  # aggregated by dag_id until someone writes a rule for them.

@@ -1,0 +1,91 @@
+version: 2
+
+models:
+  - name: stg_market_candles
+    description: >
+      Deduplicated, typed and quality-flagged 1-minute bars. One row per
+      (symbol, open_time); tombstones removed. This is the only place in the
+      project that pays the FINAL dedup cost.
+    tests:
+      - not_empty
+      - unique_combination:
+          combination_of_columns: [symbol, open_time]
+      - ohlc_consistent
+      # Staging should be within a couple of minutes of live. This is the
+      # earliest model-level detection point for a stalled pipeline, whatever
+      # the underlying cause.
+      - fresher_than:
+          column_name: open_time
+          max_age_minutes: 30
+          config:
+            severity: warn
+    columns:
+      - name: symbol
+        description: Trading pair. Foreign key to stg_symbols.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_symbols')
+              field: symbol
+      - name: open_time
+        description: Start of the covered minute, UTC, always second-aligned.
+        tests:
+          - not_null
+          - no_future_timestamps
+      - name: close_price
+        tests:
+          - not_null
+          - value_between: {min_value: 0, inclusive: false}
+      - name: open_price
+        tests: [{value_between: {min_value: 0, inclusive: false}}]
+      - name: high_price
+        tests: [{value_between: {min_value: 0, inclusive: false}}]
+      - name: low_price
+        tests: [{value_between: {min_value: 0, inclusive: false}}]
+      - name: volume
+        tests: [{value_between: {min_value: 0}}]
+      - name: trade_count
+        tests: [{value_between: {min_value: 0}}]
+      - name: taker_buy_ratio
+        description: Share of volume that was taker-initiated buying. A ratio, so bounded by construction.
+        tests:
+          - value_between: {min_value: 0, max_value: 1}
+      - name: cdc_operation
+        tests:
+          - accepted_values:
+              values: ['c', 'u', 'r']
+      - name: cdc_lag_seconds
+        description: >
+          Postgres commit to ClickHouse visibility, per row. Negative values
+          would mean the two clocks disagree, which invalidates the metric, so
+          the lower bound is asserted.
+        tests:
+          - value_between: {min_value: -5, max_value: 3600}
+
+  - name: stg_symbols
+    description: Deduplicated tradable-pair dimension, deletes flagged rather than dropped.
+    tests:
+      - not_empty
+    columns:
+      - name: symbol
+        tests: [not_null, unique]
+      - name: base_asset
+        tests: [not_null]
+      - name: quote_asset
+        tests: [not_null]
+
+  - name: stg_fx_rates
+    description: >
+      FX rate history, one row per published as_of. Retained in ClickHouse even
+      though Postgres keeps only the current value.
+    columns:
+      - name: rate
+        tests:
+          - not_null
+          - value_between: {min_value: 0, max_value: 1000000, inclusive: false}
+      - name: as_of
+        tests:
+          - not_null
+          - no_future_timestamps
+      - name: pair
+        tests: [not_null]

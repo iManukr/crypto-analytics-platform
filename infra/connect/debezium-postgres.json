@@ -1,0 +1,68 @@
+{
+  "name": "crypto-oltp-cdc",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+
+    "__doc_connection": "Connects as the dedicated replication role, which holds REPLICATION + SELECT and nothing else. Keys prefixed __doc are stripped by scripts/register_connector.py before the config is sent; they exist so the rationale lives next to the setting it explains.",
+    "database.hostname": "${POSTGRES_HOST}",
+    "database.port": "${POSTGRES_PORT}",
+    "database.user": "${DEBEZIUM_USER}",
+    "database.password": "${DEBEZIUM_PASSWORD}",
+    "database.dbname": "${POSTGRES_DB}",
+
+    "__doc_topics": "Topics are named <prefix>.<schema>.<table>, e.g. cdc.crypto.market_candles_1m. The ClickHouse Kafka engine tables subscribe to exactly these names.",
+    "topic.prefix": "${CDC_TOPIC_PREFIX}",
+    "schema.include.list": "crypto",
+    "table.include.list": "crypto.symbols,crypto.market_candles_1m,crypto.fx_rates",
+
+    "__doc_slot": "pgoutput is Postgres' in-tree logical decoding plugin, so no extension needs installing in the database image. The publication is created by the DB init script rather than autocreated here, which keeps the connector role free of DDL rights and puts the captured-table list under version control.",
+    "plugin.name": "pgoutput",
+    "slot.name": "dbz_crypto_slot",
+    "publication.name": "dbz_publication",
+    "publication.autocreate.mode": "disabled",
+
+    "__doc_snapshot": "initial = take a consistent snapshot of rows that already exist, then switch to streaming. This is what lets a freshly created ClickHouse converge on the full history instead of only seeing changes made after it booted.",
+    "snapshot.mode": "initial",
+    "snapshot.fetch.size": "10240",
+
+    "__doc_heartbeat": "Without a heartbeat the replication slot's confirmed LSN only advances when a CAPTURED table changes. If the captured tables go quiet while the rest of the database stays busy, Postgres retains WAL forever and eventually fills the disk. The heartbeat forces periodic acknowledgement, and the action query gives the slot something to advance on even in total silence. This is the single most common way a Debezium deployment takes down its source database.",
+    "heartbeat.interval.ms": "10000",
+    "heartbeat.action.query": "SELECT pg_logical_emit_message(false, 'dbz-heartbeat', now()::text)",
+
+    "__doc_types": "Numerics as strings, not doubles: an 8-decimal-place price has to survive the hop exactly, and a float64 round-trip does not guarantee that. ClickHouse parses the strings straight into Decimal in the materialized view.",
+    "decimal.handling.mode": "string",
+    "time.precision.mode": "adaptive",
+    "interval.handling.mode": "string",
+
+    "__doc_delete": "Tombstones suppressed: the ClickHouse side keeps deletes as _op='d' rows so the staging layer decides the semantics, rather than depending on Kafka log compaction to erase them.",
+    "tombstones.on.delete": "false",
+
+    "__doc_converters": "Schemaless JSON. The ClickHouse Kafka engine reads each message as a single String and projects fields in a materialized view, so a Schema Registry would add an operational dependency without buying anything at this scale. Moving to Avro + Registry is a converter swap plus a format change on three Kafka tables; see docs/SCALING.md.",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+
+    "__doc_errors": "errors.tolerance is deliberately 'none'. For a CDC source, silently skipping a record does not degrade the data - it corrupts the replica, permanently and invisibly, because the missed change never comes back. Failing the task is the correct behaviour: Prometheus alerts on the connector state within 30s and the run is resumable from the slot once the cause is fixed. Retries still absorb transient Postgres restarts.",
+    "errors.tolerance": "none",
+    "errors.log.enable": "true",
+    "errors.log.include.messages": "true",
+    "errors.retry.timeout": "300000",
+    "errors.retry.delay.max.ms": "10000",
+
+    "__doc_throughput": "Modest queue sizes; this is a laptop-scale deployment feeding a single-partition topic.",
+    "max.batch.size": "2048",
+    "max.queue.size": "8192",
+    "poll.interval.ms": "500",
+
+    "__doc_topic_creation": "Explicit topic shape rather than relying on broker auto-creation, so retention and partition count are declared rather than inherited.",
+    "topic.creation.default.replication.factor": "1",
+    "topic.creation.default.partitions": "1",
+    "topic.creation.default.cleanup.policy": "delete",
+    "topic.creation.default.retention.ms": "604800000",
+
+    "provide.transaction.metadata": "false",
+    "skipped.operations": "none"
+  }
+}

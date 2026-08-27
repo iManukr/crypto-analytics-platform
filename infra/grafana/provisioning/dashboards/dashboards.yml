@@ -1,0 +1,17 @@
+apiVersion: 1
+
+providers:
+  - name: crypto-analytics
+    orgId: 1
+    folder: Crypto Analytics Platform
+    type: file
+    disableDeletion: false
+    # Dashboards are provisioned from files under version control, so the
+    # committed JSON is the source of truth. allowUiUpdates lets an operator
+    # tweak a panel live during an incident without fighting the provisioner;
+    # the change is lost on restart, which is the intended pressure to commit it.
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

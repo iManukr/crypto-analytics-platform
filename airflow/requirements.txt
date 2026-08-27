@@ -1,0 +1,14 @@
+# Installed into the Airflow environment itself, under the official constraints
+# file for this Airflow version so nothing can drag Airflow's own pins around.
+#
+# dbt is deliberately NOT here. It lives in an isolated virtualenv at
+# /opt/dbt-venv (see the Dockerfile) because dbt-core and Airflow have
+# overlapping, conflicting requirements on Jinja2, click and protobuf. Isolating
+# it means an Airflow upgrade cannot break dbt and a dbt upgrade cannot break
+# the scheduler, at the cost of invoking dbt as a subprocess - which is what
+# the BashOperator does anyway.
+psycopg2-binary==2.9.9
+requests==2.32.3
+prometheus-client==0.21.1
+clickhouse-connect==0.8.11
+apache-airflow-providers-http==4.13.1

@@ -1,0 +1,72 @@
+# -----------------------------------------------------------------------------
+# dbt profile.
+#
+# Committed on purpose and driven entirely by env_var, so there is no
+# uncommitted ~/.dbt/profiles.yml that a reviewer has to be told about and CI
+# has to recreate. Secrets still come from the environment; only the shape is
+# in version control.
+#
+# Targets:
+#   dev  - the docker compose stack (the default)
+#   ci   - the ClickHouse service container in GitHub Actions
+#   prod - a real cluster; identical model code, different connection + threads
+# -----------------------------------------------------------------------------
+crypto_analytics:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+
+    dev:
+      type: clickhouse
+      driver: http
+      host: "{{ env_var('CLICKHOUSE_HOST', 'clickhouse') }}"
+      port: "{{ env_var('CLICKHOUSE_HTTP_PORT', '8123') | int }}"
+      user: "{{ env_var('CLICKHOUSE_USER', 'analytics') }}"
+      password: "{{ env_var('CLICKHOUSE_PASSWORD', '') }}"
+      schema: "{{ env_var('CLICKHOUSE_DB', 'analytics') }}"
+      secure: False
+      verify: False
+      connect_timeout: 10
+      send_receive_timeout: 300
+      # Modest, because ClickHouse is sharing a laptop with eleven other
+      # containers. Raise it in prod; ClickHouse parallelises within a query
+      # too, so more dbt threads is not automatically faster.
+      threads: 4
+      # Local single node has no replication, so there is nothing to wait for.
+      cluster_mode: False
+      use_lw_deletes: False
+      custom_settings:
+        # Every staging view uses FINAL. Confining the merge to one partition at
+        # a time is the single biggest performance lever available here, and it
+        # is safe because the dedup key never spans a partition boundary.
+        do_not_merge_across_partitions_select_final: 1
+        # Fail loudly rather than silently truncating a Decimal.
+        decimal_check_overflow: 1
+
+    ci:
+      type: clickhouse
+      driver: http
+      host: "{{ env_var('CLICKHOUSE_HOST', 'localhost') }}"
+      port: "{{ env_var('CLICKHOUSE_HTTP_PORT', '8123') | int }}"
+      user: "{{ env_var('CLICKHOUSE_USER', 'default') }}"
+      password: "{{ env_var('CLICKHOUSE_PASSWORD', '') }}"
+      schema: "{{ env_var('CLICKHOUSE_DB', 'analytics') }}"
+      secure: False
+      threads: 2
+      connect_timeout: 10
+      send_receive_timeout: 300
+
+    prod:
+      type: clickhouse
+      driver: http
+      host: "{{ env_var('CLICKHOUSE_HOST') }}"
+      port: "{{ env_var('CLICKHOUSE_HTTP_PORT', '8443') | int }}"
+      user: "{{ env_var('CLICKHOUSE_USER') }}"
+      password: "{{ env_var('CLICKHOUSE_PASSWORD') }}"
+      schema: "{{ env_var('CLICKHOUSE_DB', 'analytics') }}"
+      secure: True
+      verify: True
+      threads: 8
+      cluster: "{{ env_var('CLICKHOUSE_CLUSTER', 'default') }}"
+      cluster_mode: True
+      connect_timeout: 15
+      send_receive_timeout: 600

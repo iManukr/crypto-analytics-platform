@@ -1,0 +1,156 @@
+version: 2
+
+models:
+  # ==========================================================================
+  - name: fct_candles_1m
+    description: >
+      Canonical 1-minute OHLCV fact, enriched with the point-in-time FX rate and
+      the symbol dimension. ORDER BY (symbol, open_time), partitioned monthly.
+      This is the table everything else in the mart layer is built from.
+    tests:
+      - not_empty
+      - unique_combination:
+          combination_of_columns: [symbol, open_time]
+      - ohlc_consistent
+      - fresher_than:
+          column_name: open_time
+          max_age_minutes: 60
+      # Small gaps are normal (restarts, quiet minutes). A collapse in coverage
+      # is not, and this is the difference between the two.
+      - series_coverage:
+          partition_column: symbol
+          time_column: open_time
+          interval_seconds: 60
+          max_missing_pct: 15
+          lookback_hours: 6
+          config:
+            severity: warn
+    columns:
+      - name: symbol
+        tests:
+          - not_null
+          - relationships: {to: ref('dim_symbol'), field: symbol}
+      - name: open_time
+        tests: [not_null, no_future_timestamps]
+      - name: close_price
+        tests: [not_null, {value_between: {min_value: 0, inclusive: false}}]
+      - name: vwap_approx
+        description: quote_volume / volume. Must sit inside the bar's own range.
+        tests: [{value_between: {min_value: 0, inclusive: false}}]
+      - name: fx_rate
+        description: >
+          Rate in effect at open_time, resolved by ASOF join. Null for candles
+          older than the first FX observation, which is expected on a fresh
+          install and is why close_price_fx is nullable.
+      - name: is_valid
+        tests:
+          - accepted_values: {values: [true, false]}
+      - name: data_source
+        description: binance for live data, replay for the offline generator.
+        tests:
+          - accepted_values: {values: ['binance', 'replay']}
+      - name: cdc_lag_seconds
+        tests:
+          - value_between: {min_value: -5, max_value: 3600}
+
+  # ==========================================================================
+  - name: dim_symbol
+    description: Tradable-pair dimension with per-symbol activity statistics.
+    tests:
+      - not_empty
+    columns:
+      - name: symbol
+        tests: [not_null, unique]
+      - name: candle_count
+        tests: [{value_between: {min_value: 0}}]
+      - name: is_stale
+        description: Active upstream but no candle in the last hour, i.e. a broken ingestion path.
+
+  # ==========================================================================
+  - name: agg_candles_5m
+    description: >
+      Authoritative 5-minute rollup, aggregated from the deduplicated fact.
+      Reconciles exactly. The ClickHouse materialized view raw.candles_5m_rt
+      covers the same grain with second-level latency but approximate volume;
+      use that one for live dashboards and this one for anything that has to add
+      up.
+    tests:
+      - not_empty
+      - unique_combination:
+          combination_of_columns: [symbol, bucket_start]
+      - ohlc_consistent
+    columns:
+      - name: bucket_start
+        tests: [not_null, no_future_timestamps]
+      - name: minutes_covered
+        description: Distinct minutes aggregated into the bucket. Cannot exceed 5.
+        tests:
+          - value_between: {min_value: 1, max_value: 5}
+      - name: taker_buy_ratio
+        tests: [{value_between: {min_value: 0, max_value: 1}}]
+      - name: volume
+        tests: [{value_between: {min_value: 0}}]
+
+  # ==========================================================================
+  - name: fct_market_daily
+    description: Daily market summary for reporting and BI.
+    tests:
+      - unique_combination:
+          combination_of_columns: [symbol, trade_date]
+      - ohlc_consistent
+    columns:
+      - name: trade_date
+        tests: [not_null]
+      - name: coverage_pct
+        description: Share of the day's 1440 minutes present. Below 100% for the in-progress day.
+        tests:
+          - value_between: {min_value: 0, max_value: 100}
+      - name: realised_volatility
+        tests: [{value_between: {min_value: 0}}]
+
+  # ==========================================================================
+  - name: ml_features_1m
+    description: >
+      Leakage-safe feature matrix at 1-minute grain, plus forward-looking labels.
+
+      Contract for consumers:
+        * Every column NOT prefixed `target_` is computed from the current row
+          and earlier rows only.
+        * `target_*` columns look one minute ahead and are labels, never inputs.
+        * Filter `is_label_resolved = 1` before training. Rows failing it have no
+          future yet and their labels are placeholder zeros.
+        * Filter `has_contiguous_history = 1` for return-based models: a return
+          computed across an ingestion gap is not a 1-minute return.
+        * Filter `is_synthetic = 0` to exclude rows produced by the offline
+          replay generator.
+    tests:
+      - not_empty
+      - unique_combination:
+          combination_of_columns: [symbol, open_time]
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: open_time
+        tests: [not_null, no_future_timestamps]
+      - name: rsi_14
+        description: Wilder's RSI. Bounded by definition; a value outside [0,100] means the formula broke.
+        tests:
+          - not_null
+          - value_between: {min_value: 0, max_value: 100}
+      - name: pct_of_60m_range
+        tests: [{value_between: {min_value: 0, max_value: 1}}]
+      - name: volatility_15
+        tests: [{value_between: {min_value: 0}}]
+      - name: atr_15
+        tests: [{value_between: {min_value: 0}}]
+      - name: target_direction_up
+        tests:
+          - not_null
+          - accepted_values: {values: [0, 1], quote: false}
+      - name: is_label_resolved
+        tests:
+          - accepted_values: {values: [0, 1], quote: false}
+      - name: minute_of_day
+        tests: [{value_between: {min_value: 0, max_value: 1439}}]
+      - name: day_of_week
+        tests: [{value_between: {min_value: 1, max_value: 7}}]

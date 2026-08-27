@@ -1,0 +1,235 @@
+{
+  "uid": "platform-resources",
+  "title": "Platform Resources",
+  "description": "Infrastructure view: what the storage, streaming and orchestration tiers are doing under the pipeline. Use this after Pipeline Health has told you something is wrong.",
+  "tags": ["platform", "clickhouse", "postgres", "kafka"],
+  "timezone": "utc",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "type": "row",
+      "title": "ClickHouse (OLAP)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Active parts per table",
+      "description": "The ClickHouse metric worth watching most. Inserts create parts; background merges collapse them. A sustained climb means merges are losing, and ClickHouse hard-rejects writes at parts_to_throw_insert (3000 by default). The fix is fewer, larger inserts, not a higher limit.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "clickhouse_table_parts", "legendFormat": "{{database}}.{{table}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 300 }, { "color": "red", "value": 1000 }] }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Rows per table",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "pipeline_olap_rows_total", "legendFormat": "{{database}}.{{table}}" },
+        { "refId": "B", "expr": "pipeline_oltp_rows_total", "legendFormat": "postgres.{{table}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "timeseries",
+      "title": "ClickHouse query rate and memory",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 9 },
+      "targets": [
+        { "refId": "A", "expr": "rate(ClickHouseProfileEvents_Query[5m])", "legendFormat": "queries/s" },
+        { "refId": "B", "expr": "rate(ClickHouseProfileEvents_InsertedRows[5m])", "legendFormat": "inserted rows/s" },
+        { "refId": "C", "expr": "rate(ClickHouseProfileEvents_MergedRows[5m])", "legendFormat": "merged rows/s" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "ClickHouse memory tracked",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 9 },
+      "targets": [
+        { "refId": "A", "expr": "ClickHouseMetrics_MemoryTracking", "legendFormat": "tracked memory" },
+        { "refId": "B", "expr": "ClickHouseAsyncMetrics_OSMemoryAvailable", "legendFormat": "OS memory available" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+
+    {
+      "type": "row",
+      "title": "Postgres (OLTP) and replication",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Replication slot lag",
+      "description": "WAL bytes Postgres is retaining because a logical slot has not confirmed them. This is the number that predicts a disk-full outage on the SOURCE database - the classic way a CDC deployment breaks the system it was only meant to observe. The Debezium heartbeat exists specifically to keep this flat during quiet periods.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+      "targets": [
+        { "refId": "A", "expr": "cdc_replication_slot_lag_bytes", "legendFormat": "{{slot}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1073741824 }] }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Postgres connections and transactions",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+      "targets": [
+        { "refId": "A", "expr": "sum(pg_stat_database_numbackends)", "legendFormat": "connections" },
+        { "refId": "B", "expr": "sum(rate(pg_stat_database_xact_commit[5m]))", "legendFormat": "commits/s" },
+        { "refId": "C", "expr": "sum(rate(pg_stat_database_xact_rollback[5m]))", "legendFormat": "rollbacks/s" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+
+    {
+      "type": "row",
+      "title": "Kafka (streaming)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Topic throughput",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 26 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (topic) (rate(kafka_topic_partition_current_offset{topic=~\"cdc.*\"}[5m]))",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "wps", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer group lag by partition",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 26 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "kafka_consumergroup_lag{topic=~\"cdc.*\"}",
+          "legendFormat": "{{consumergroup}} {{topic}} p{{partition}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+
+    {
+      "type": "row",
+      "title": "Orchestration",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Scheduler heartbeat",
+      "description": "Flat means the scheduler has stopped and nothing is being orchestrated, even though the streaming path keeps working.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 34 },
+      "targets": [
+        { "refId": "A", "expr": "rate(airflow_scheduler_heartbeat[5m])", "legendFormat": "heartbeat/s" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Task duration by task",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 34 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "airflow_task_duration{quantile=\"0.95\"}",
+          "legendFormat": "{{dag_id}}.{{task_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Exporter target availability",
+      "description": "Whether the observability layer itself can see each system. A zero here means the metrics are missing, not necessarily that the system is.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 34 },
+      "targets": [
+        { "refId": "A", "expr": "exporter_target_up", "legendFormat": "{{target}}" },
+        { "refId": "B", "expr": "up", "legendFormat": "scrape: {{job}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "max": 1,
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } }
+    }
+  ]
+}

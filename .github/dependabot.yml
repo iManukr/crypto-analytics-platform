@@ -1,0 +1,53 @@
+# =============================================================================
+# Dependency updates.
+#
+# Weekly rather than daily: a data platform with pinned dependencies wants a
+# reviewable batch, not a stream of single-package pull requests that nobody
+# reads. Grouped by ecosystem for the same reason.
+#
+# Every update runs the full CI suite, including the end-to-end job, so a bump
+# that breaks CDC or a dbt model is caught before it can be merged.
+# =============================================================================
+version: 2
+
+updates:
+  - package-ecosystem: pip
+    directories:
+      - "/ingestion"
+      - "/exporter"
+      - "/airflow"
+      - "/dbt"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      container-images:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "deps(docker)"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

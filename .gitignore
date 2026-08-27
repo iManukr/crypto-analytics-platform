@@ -6,8 +6,11 @@ certificates/
 *.pem
 *.cert
 *.key
-service.*
 ca.pem
+# Scoped to the certificates directory on purpose. A bare `service.*` here -
+# which is what this was - also matches ingestion/service.py and silently
+# excludes the ingestion loop from the repository.
+certificates/service.*
 
 # ---- Python ----
 __pycache__/
@@ -19,6 +22,12 @@ build/
 dist/
 *.egg-info/
 .eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # ---- Virtual environments ----
 venv/
@@ -26,6 +35,21 @@ venv/
 env/
 ENV/
 .conda/
+
+# ---- dbt ----
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/.user.yml
+
+# ---- Airflow ----
+airflow/logs/
+airflow/*.cfg
+airflow/*.db
+airflow/webserver_config.py
+
+# ---- Runtime state shared between containers ----
+.state/
 
 # ---- Jupyter / Colab ----
 .ipynb_checkpoints/
@@ -44,6 +68,8 @@ desktop.ini
 
 # ---- Logs & local data ----
 *.log
-*.csv
 *.tmp
+*.csv
+!dbt/seeds/*.csv
+!tests/fixtures/*.csv
 .claude/

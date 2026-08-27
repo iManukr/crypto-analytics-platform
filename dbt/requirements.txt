@@ -1,0 +1,9 @@
+# Compatible-release pins rather than exact ones: dbt-clickhouse ships adapter
+# fixes frequently within a minor, and pinning to a patch that later yanks
+# leaves the image unbuildable. The minor IS pinned, so no breaking change can
+# arrive unannounced. CI resolves this on every run, so a bad release surfaces
+# in a pull request rather than in production.
+dbt-core~=1.8.0
+dbt-clickhouse~=1.8.0
+# Used by the Airflow DAG to publish dbt test results into analytics_ops.
+clickhouse-connect~=0.8.0

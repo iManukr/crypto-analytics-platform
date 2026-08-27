@@ -1,0 +1,63 @@
+# =============================================================================
+# CI overlay.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
+#
+# Two changes from the local stack, both about making the end-to-end job a test
+# of the PIPELINE rather than a test of the network:
+#
+#   1. INGEST_SOURCE=replay. A GitHub runner may sit in a jurisdiction Binance
+#      geo-blocks, and even when it does not, a third-party API's availability
+#      has no business deciding whether a pull request is mergeable. The replay
+#      source exercises the identical code path - only the bytes at the very
+#      edge differ - and it is deterministic, so assertions can be exact.
+#
+#   2. Everything is faster and smaller. A tight ingest interval and a short
+#      backfill get enough rows through every stage in under two minutes
+#      without waiting on real wall-clock minutes to elapse.
+# =============================================================================
+
+services:
+
+  ingestion:
+    environment:
+      INGEST_SOURCE: replay
+      # Disable the fallback: in CI the replay source IS the source, and a
+      # silent switch would hide a genuine failure of the live path.
+      INGEST_FALLBACK_AFTER_FAILURES: "0"
+      INGEST_INTERVAL_SECONDS: "5"
+      # 120 minutes of history lands immediately from the generator, which is
+      # more than the 60-minute window in ml_features_1m needs to warm up.
+      BACKFILL_MINUTES: "120"
+      SYMBOLS: ETHUSDT,BTCUSDT
+      # The FX providers are external too. A long interval means the loop does
+      # not repeatedly fail against them during a short CI run.
+      FX_REFRESH_SECONDS: "86400"
+      LOG_LEVEL: DEBUG
+
+  airflow-scheduler:
+    environment:
+      INGEST_SOURCE: replay
+      BACKFILL_MINUTES: "120"
+      # Every 5 minutes, so a CI run that triggers the DAG manually is not
+      # racing a scheduled one.
+      AIRFLOW_SCHEDULE_CRON: "*/5 * * * *"
+      AIRFLOW__CORE__PARALLELISM: "4"
+
+  airflow-webserver:
+    environment:
+      INGEST_SOURCE: replay
+
+  exporter:
+    environment:
+      EXPORTER_SCRAPE_INTERVAL: "5"
+
+  # Runners are memory-constrained; keep ClickHouse well inside the budget so
+  # the OOM killer does not take out the container mid-assertion.
+  clickhouse:
+    environment:
+      CLICKHOUSE_MAX_SERVER_MEMORY_USAGE_TO_RAM_RATIO: "0.5"
+
+  connect:
+    environment:
+      KAFKA_HEAP_OPTS: "-Xms256M -Xmx512M"

@@ -1,0 +1,92 @@
+# =============================================================================
+# Prometheus scrape configuration.
+#
+# Scrape interval is 15s across the board. The tightest thing we alert on is CDC
+# lag with a 2-minute SLA, so 15s gives ~8 samples inside the SLA window - enough
+# for a `for:` clause to distinguish a real stall from a single slow scrape.
+# =============================================================================
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    environment: local
+    platform: crypto-analytics
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    # No Alertmanager in the local stack: with a single operator watching a
+    # dashboard, routing and deduplication solve a problem that does not exist
+    # yet, and it would be one more container to keep alive. Alert RULES are
+    # fully defined regardless, so they evaluate and show up in the Prometheus
+    # UI and in Grafana - adding Alertmanager later is a config change, not a
+    # rewrite. See docs/OBSERVABILITY.md.
+    - static_configs:
+        - targets: []
+
+scrape_configs:
+  # ------------------------------------------------------------ Prometheus
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ------------------------------------------------- the data-quality view
+  # The most important target here. Everything else reports on infrastructure;
+  # this one reports on whether the DATA is correct and current.
+  - job_name: pipeline-exporter
+    static_configs:
+      - targets: ["exporter:9101"]
+        labels:
+          component: data-quality
+
+  # --------------------------------------------------------- ingestion tier
+  - job_name: ingestion
+    static_configs:
+      - targets: ["ingestion:8000"]
+        labels:
+          component: ingestion
+
+  # ---------------------------------------------------------- storage tier
+  - job_name: clickhouse
+    # ClickHouse publishes Prometheus metrics natively (see
+    # infra/clickhouse/config.d/prometheus.xml), so no sidecar exporter.
+    static_configs:
+      - targets: ["clickhouse:9363"]
+        labels:
+          component: olap
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+        labels:
+          component: oltp
+
+  # ------------------------------------------------------------ stream tier
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+        labels:
+          component: streaming
+
+  # -------------------------------------------------------- orchestration
+  # Airflow emits StatsD, which statsd-exporter translates into Prometheus
+  # metrics using the mapping in infra/statsd/statsd-mapping.yml. That mapping
+  # is what keeps per-task metrics from becoming unbounded label cardinality.
+  - job_name: airflow
+    static_configs:
+      - targets: ["statsd-exporter:9102"]
+        labels:
+          component: orchestration
+
+  # ------------------------------------------------------- container tier
+  # Optional: only present when the stack is started with the `full` profile.
+  # honor_labels avoids cAdvisor's own labels colliding with ours.
+  - job_name: cadvisor
+    honor_labels: true
+    static_configs:
+      - targets: ["cadvisor:8080"]
+        labels:
+          component: containers
