@@ -11,9 +11,7 @@ dbt/target
 dbt/dbt_packages
 dbt/logs
 airflow/logs
-legacy
 assets
-certificates
 docs
 .state
 .env

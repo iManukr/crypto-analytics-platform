@@ -25,7 +25,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-SKIP_DIRS = {".git", ".venv", "venv", "legacy", "target", "dbt_packages", "node_modules", ".claude"}
+SKIP_DIRS = {".git", ".venv", "venv", "target", "dbt_packages", "node_modules", ".claude"}
 
 failures: list[str] = []
 checked = 0

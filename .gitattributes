@@ -32,4 +32,3 @@ Dockerfile text eol=lf
 
 # Keep generated artefacts out of diffs and language statistics.
 dbt/target/**   linguist-generated=true
-legacy/**       linguist-vendored=true

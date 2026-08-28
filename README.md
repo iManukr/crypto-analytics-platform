@@ -428,9 +428,11 @@ teaches people to ignore the badge.
 ├── exporter/                   # cross-system data-quality metrics
 ├── scripts/                    # connector registration, stage validation
 ├── tests/                      # unit + integration
-├── docs/                       # design report, data model, observability, runbook, scaling
-└── legacy/                     # the Phase-1 prototype this supersedes
+└── docs/                       # design report, data model, observability, runbook, scaling
 ```
+
+The Phase-1 prototype this supersedes now lives in its own repo:
+[`ethereum-price-pipeline`](../ethereum-price-pipeline).
 
 ---
 

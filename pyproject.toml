@@ -67,7 +67,7 @@ exclude_lines = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["legacy", ".venv", "dbt/target", "dbt/dbt_packages"]
+extend-exclude = [".venv", "dbt/target", "dbt/dbt_packages"]
 
 [tool.ruff.lint]
 select = [
