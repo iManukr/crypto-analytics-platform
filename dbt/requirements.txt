@@ -6,4 +6,4 @@
 dbt-core~=1.8.0
 dbt-clickhouse~=1.8.0
 # Used by the Airflow DAG to publish dbt test results into analytics_ops.
-clickhouse-connect~=0.8.0
+clickhouse-connect~=1.7.2
