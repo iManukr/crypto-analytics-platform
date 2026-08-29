@@ -14,7 +14,7 @@ set -uo pipefail
 COMPOSE="${COMPOSE_CMD:-docker compose}"
 CH_URL="http://localhost:${CLICKHOUSE_PUBLISHED_HTTP_PORT:-8123}"
 CH_USER="${CLICKHOUSE_USER:-analytics}"
-CH_PASS="${CLICKHOUSE_PASSWORD:-analytics_pw}"
+CH_PASS="${CLICKHOUSE_PASSWORD:-changeme_clickhouse}"
 PG_USER="${POSTGRES_USER:-crypto_app}"
 PG_DB="${POSTGRES_DB:-crypto}"
 

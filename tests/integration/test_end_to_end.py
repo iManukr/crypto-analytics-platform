@@ -35,14 +35,14 @@ pytestmark = pytest.mark.integration
 CH_URL = f"http://{os.environ.get('CLICKHOUSE_HOST', 'localhost')}:{os.environ.get('CLICKHOUSE_HTTP_PORT', '8123')}/"
 CH_AUTH = (
     os.environ.get("CLICKHOUSE_USER", "analytics"),
-    os.environ.get("CLICKHOUSE_PASSWORD", "analytics_pw"),
+    os.environ.get("CLICKHOUSE_PASSWORD", "changeme_clickhouse"),
 )
 PG_DSN = (
     f"host={os.environ.get('POSTGRES_HOST', 'localhost')} "
     f"port={os.environ.get('POSTGRES_PUBLISHED_PORT', '5432')} "
     f"dbname={os.environ.get('POSTGRES_DB', 'crypto')} "
     f"user={os.environ.get('POSTGRES_USER', 'crypto_app')} "
-    f"password={os.environ.get('POSTGRES_PASSWORD', 'crypto_app_pw')}"
+    f"password={os.environ.get('POSTGRES_PASSWORD', 'changeme_app')}"
 )
 CONNECT_URL = os.environ.get("KAFKA_CONNECT_URL", "http://localhost:8083")
 

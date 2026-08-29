@@ -22,7 +22,7 @@ COMPOSE="${COMPOSE_CMD:-docker compose}"
 CONNECT_URL="${KAFKA_CONNECT_URL_HOST:-http://localhost:8083}"
 CH_URL="http://localhost:${CLICKHOUSE_PUBLISHED_HTTP_PORT:-8123}"
 CH_USER="${CLICKHOUSE_USER:-analytics}"
-CH_PASS="${CLICKHOUSE_PASSWORD:-analytics_pw}"
+CH_PASS="${CLICKHOUSE_PASSWORD:-changeme_clickhouse}"
 
 deadline=$(( $(date +%s) + TIMEOUT ))
 
