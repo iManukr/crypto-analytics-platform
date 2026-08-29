@@ -43,15 +43,26 @@ models:
           older than the first FX observation, which is expected on a fresh
           install and is why close_price_fx is nullable.
       - name: is_valid
+        description: >
+          Materialises as UInt8, not a boolean: ClickHouse has no separate
+          boolean column type here. The accepted values are therefore 0/1 with
+          quote:false - YAML `true`/`false` would be rendered as the strings
+          'True'/'False' and fail with a TYPE_MISMATCH against a UInt8 column.
         tests:
-          - accepted_values: {values: [true, false]}
+          - accepted_values: {values: [0, 1], quote: false}
       - name: data_source
         description: binance for live data, replay for the offline generator.
         tests:
           - accepted_values: {values: ['binance', 'replay']}
       - name: cdc_lag_seconds
+        description: >
+          Lower bound only. A negative lag means the Postgres and ClickHouse
+          clocks disagree and the metric itself is invalid. There is no upper
+          bound, because a replayed backlog legitimately carries an old commit
+          timestamp - see the note on the same column in staging.yml. Prompt
+          delivery is asserted by tests/assert_cdc_lag_within_sla.sql.
         tests:
-          - value_between: {min_value: -5, max_value: 3600}
+          - value_between: {min_value: -5}
 
   # ==========================================================================
   - name: dim_symbol

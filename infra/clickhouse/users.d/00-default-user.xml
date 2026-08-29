@@ -1,27 +1,31 @@
 <clickhouse>
-    <users>
-        <default>
-            <!-- Loopback only: this account has no password and exists so the
-                 container's own bootstrap scripts can run. Every client that
-                 reaches ClickHouse over the network uses the analytics account,
-                 created by 00-create-user.sh from .env. -->
-            <networks>
-                <ip>127.0.0.1</ip>
-                <ip>::1</ip>
-            </networks>
-        </default>
-    </users>
+    <!--
+      Only a settings profile is defined here.
 
+      Earlier revisions of this file also tried to constrain the built-in
+      `default` account and to hand it grants so it could create the analytics
+      account by SQL. Both were dead ends:
+
+        * <grants> cannot be combined with any other access-control setting on
+          the same user, and the base users.xml already sets some, so the server
+          refused to start ("Any other access control settings can't be
+          specified with `grants`").
+        * The account is created by the image's entrypoint from CLICKHOUSE_USER
+          anyway, which is simpler and is how the image is meant to be used.
+
+      The account therefore comes from the entrypoint; this file only supplies
+      the profile that account runs under.
+    -->
     <profiles>
         <analytics_profile>
             <max_memory_usage>4000000000</max_memory_usage>
             <max_execution_time>300</max_execution_time>
             <max_threads>4</max_threads>
-            <!-- FINAL is on the hot path for every staging view. Restricting the
-                 merge to within a partition makes it dramatically cheaper, and
-                 is safe here because the dedup key never spans partitions: the
-                 partition expression is derived from open_time, which is itself
-                 part of ORDER BY. -->
+            <!-- FINAL is on the hot path for every staging view. Confining the
+                 merge to one partition at a time is the single biggest
+                 performance lever here, and it is safe because the dedup key
+                 never spans a partition boundary: the partition expression is
+                 derived from open_time, which is itself part of ORDER BY. -->
             <do_not_merge_across_partitions_select_final>1</do_not_merge_across_partitions_select_final>
             <optimize_move_to_prewhere>1</optimize_move_to_prewhere>
         </analytics_profile>

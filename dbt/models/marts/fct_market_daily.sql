@@ -50,21 +50,15 @@ daily as (
         sum(volume)                                         as volume,
         sum(quote_volume)                                   as quote_volume,
         sum(trade_count)                                    as trade_count,
-        if(sum(volume) > 0, sum(quote_volume) / sum(volume),
-           argMax(close_price, bucket_start))               as vwap,
+        /* vwap is derived in the outer SELECT, not here. Referencing an
+           aggregate's own output alias inside another aggregate in the same
+           SELECT makes ClickHouse bind `volume` to the alias rather than the
+           column, and it rejects the query with ILLEGAL_AGGREGATION. */
 
         argMax(fx_rate, bucket_start)                       as fx_rate_eod,
         sum(minutes_covered)                                as minutes_covered,
         countIf(not is_complete)                            as incomplete_buckets,
-        max(contains_synthetic)                             as contains_synthetic,
-
-        /* Close-to-close realised volatility across the day's 5-minute bars,
-           annualised to a daily figure. stddevPop over log returns would need a
-           second window pass; the high-low estimator below is a reasonable
-           stand-in at this grain and needs only what is already aggregated. */
-        if(min(low_price) > 0,
-           log(toFloat64(max(high_price)) / toFloat64(min(low_price))),
-           0.0)                                             as parkinson_range
+        max(contains_synthetic)                             as contains_synthetic
 
     from buckets
     group by symbol, trade_date
@@ -84,7 +78,7 @@ select
     volume,
     quote_volume,
     trade_count,
-    vwap,
+    if(volume > 0, quote_volume / volume, close_price)      as vwap,
 
     close_price - open_price                                as price_change,
     if(open_price > 0,
@@ -94,8 +88,14 @@ select
 
     /* Parkinson's estimator: uses the high-low range rather than only the
        close, so it extracts more information from the same day. The 4*ln(2)
-       constant is what makes it an unbiased estimator of variance. */
-    sqrt(parkinson_range * parkinson_range / (4.0 * log(2.0))) as realised_volatility,
+       constant is what makes it an unbiased estimator of variance.
+
+       Computed here, outside the aggregation, from the already-aggregated
+       high/low. Written inside the GROUP BY it would nest min()/max() inside
+       another aggregate and ClickHouse would reject it. */
+    if(low_price > 0,
+       sqrt(pow(log(toFloat64(high_price) / toFloat64(low_price)), 2) / (4.0 * log(2.0))),
+       0.0)                                                 as realised_volatility,
 
     fx_rate_eod                                             as fx_rate,
     if(fx_rate_eod > 0, close_price * fx_rate_eod, null)    as close_price_fx,

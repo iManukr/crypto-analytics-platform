@@ -7,8 +7,8 @@
 # it means an Airflow upgrade cannot break dbt and a dbt upgrade cannot break
 # the scheduler, at the cost of invoking dbt as a subprocess - which is what
 # the BashOperator does anyway.
-psycopg2-binary==2.9.9
+psycopg2-binary
 requests==2.32.3
 prometheus-client==0.21.1
 clickhouse-connect==0.8.11
-apache-airflow-providers-http==4.13.1
+apache-airflow-providers-http

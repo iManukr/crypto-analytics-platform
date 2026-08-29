@@ -72,7 +72,8 @@ mappings:
   - match: "airflow.ti_successes"
     name: "airflow_task_successes_total"
 
-  - match: "airflow.operator_failures_*"
+  - match: '^airflow\.operator_failures_(.+)$'
+    match_type: regex
     name: "airflow_operator_failures"
     labels:
       operator: "$1"

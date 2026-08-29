@@ -154,7 +154,11 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: "broker,controller"
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
-      KAFKA_LISTENERS: "PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092"
+      # Bind on 0.0.0.0, advertise as the service name. Binding the listener to
+      # "kafka:29092" resolves to the container IP only, so anything inside the
+      # container reaching it over loopback - the healthcheck, kafka-topics,
+      # kafka-console-consumer - fails with "Broker may not be available".
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092"
       # Two listeners on purpose: containers reach the broker as kafka:29092,
       # tools on the host reach it as localhost:9092. A single advertised
       # listener cannot satisfy both, and getting this wrong is the single most
@@ -177,7 +181,7 @@ services:
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:29092 --list > /dev/null 2>&1"]
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:29092 --list > /dev/null 2>&1"]
       interval: 10s
       timeout: 10s
       retries: 20
@@ -256,6 +260,11 @@ services:
     depends_on:
       kafka: {condition: service_healthy}
     environment:
+      # The image's entrypoint reads these and writes
+      # users.d/default-user.xml before the server starts, so the account exists
+      # by the time the init scripts run as it. That requires users.d to be
+      # WRITABLE - mounting it read-only silently breaks account creation and
+      # every later query fails with AUTHENTICATION_FAILED.
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_pw}
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
@@ -267,7 +276,7 @@ services:
     volumes:
       - clickhouse-data:/var/lib/clickhouse
       - ./infra/clickhouse/config.d:/etc/clickhouse-server/config.d:ro
-      - ./infra/clickhouse/users.d:/etc/clickhouse-server/users.d:ro
+      - ./infra/clickhouse/users.d:/etc/clickhouse-server/users.d
       - ./infra/clickhouse/init:/docker-entrypoint-initdb.d:ro
     ports:
       - "${CLICKHOUSE_PUBLISHED_HTTP_PORT:-8123}:8123"

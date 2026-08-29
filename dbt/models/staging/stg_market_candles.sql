@@ -107,7 +107,9 @@ flagged as (
         low_price  > least(open_price, close_price)             as dq_low_above_body,
         volume = 0                                              as dq_zero_volume,
         taker_buy_base > volume                                 as dq_taker_exceeds_volume,
-        source = 'replay'                                       as dq_synthetic_source
+        -- CAST(.. AS String) strips LowCardinality (toString does NOT); comparing
+        -- the raw LC column yields LowCardinality(UInt8), which cannot be a column.
+        CAST(source AS String) = 'replay'                             as dq_synthetic_source
 
     from deduplicated
 

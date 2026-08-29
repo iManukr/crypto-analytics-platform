@@ -20,7 +20,8 @@ select
     quote_asset,
     display_name,
     is_active = 1                       as is_active,
-    _op = 'd'                           as is_deleted,
+    -- CAST(.. AS String) strips LowCardinality (toString does NOT); see stg_market_candles.
+    CAST(_op AS String) = 'd'                 as is_deleted,
     created_at,
     updated_at,
     _lsn                                as cdc_lsn,

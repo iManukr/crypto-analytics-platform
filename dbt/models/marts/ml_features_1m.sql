@@ -191,7 +191,9 @@ select
        100.0 - (100.0 / (1.0 + avg_gain_14 / avg_loss_14)),
        if(avg_gain_14 > 0, 100.0, 50.0))                       as rsi_14,
 
-    volume,
+    -- volume itself is already projected above under "raw context"; repeating
+    -- it here produced "Cannot add column volume: column with this name
+    -- already exists".
     volume_sma_60,
     if(volume_std_60 > 0, (volume - volume_sma_60) / volume_std_60, 0.0)
                                                                as volume_zscore_60,
@@ -227,7 +229,9 @@ select
        make its own call. */
     toUInt8(open_time < symbol_max_open_time)                  as is_label_resolved,
     toUInt8(has_prev and has_contiguous_history)               as has_contiguous_history,
-    toUInt8(data_source = 'replay')                            as is_synthetic,
+    -- CAST strips LowCardinality from data_source; comparing the raw LC
+    -- column yields LowCardinality(UInt8), which cannot be a column.
+    toUInt8(CAST(data_source AS String) = 'replay')            as is_synthetic,
     data_source,
     now64(3)                                                   as dbt_updated_at
 

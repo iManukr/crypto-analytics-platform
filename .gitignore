@@ -73,3 +73,7 @@ desktop.ini
 !dbt/seeds/*.csv
 !tests/fixtures/*.csv
 .claude/
+
+# Written by the ClickHouse entrypoint at container start from
+# CLICKHOUSE_USER/CLICKHOUSE_PASSWORD. Generated, not authored.
+infra/clickhouse/users.d/default-user.xml

@@ -56,11 +56,24 @@ models:
               values: ['c', 'u', 'r']
       - name: cdc_lag_seconds
         description: >
-          Postgres commit to ClickHouse visibility, per row. Negative values
-          would mean the two clocks disagree, which invalidates the metric, so
-          the lower bound is asserted.
+          Postgres commit to ClickHouse visibility, per row.
+
+          Only the LOWER bound is asserted here. A negative lag means the
+          Postgres and ClickHouse clocks disagree, which invalidates the metric
+          itself and is always a defect.
+
+          There is deliberately no upper bound on this column. A high per-row
+          lag is the expected and correct result of any legitimate replay: a
+          connector restart, a warehouse rebuild, or a historical backfill all
+          deliver rows whose commit timestamp is genuinely old. Asserting an
+          upper bound across all history therefore fails permanently after the
+          first such event, for a pipeline that is working perfectly.
+
+          What actually matters - that CDC is delivering promptly *now* - is
+          asserted by tests/assert_cdc_lag_within_sla.sql, which scopes the
+          check to recently arrived rows.
         tests:
-          - value_between: {min_value: -5, max_value: 3600}
+          - value_between: {min_value: -5}
 
   - name: stg_symbols
     description: Deduplicated tradable-pair dimension, deletes flagged rather than dropped.
