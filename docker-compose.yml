@@ -25,7 +25,7 @@ x-clickhouse-env: &clickhouse-env
   CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse}
   CLICKHOUSE_HTTP_PORT: ${CLICKHOUSE_HTTP_PORT:-8123}
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
-  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_pw}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-changeme_clickhouse}
   CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
 
 x-postgres-env: &postgres-env
@@ -33,7 +33,7 @@ x-postgres-env: &postgres-env
   POSTGRES_PORT: ${POSTGRES_PORT:-5432}
   POSTGRES_DB: ${POSTGRES_DB:-crypto}
   POSTGRES_USER: ${POSTGRES_USER:-crypto_app}
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto_app_pw}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_app}
 
 x-airflow-common: &airflow-common
   build:
@@ -44,8 +44,13 @@ x-airflow-common: &airflow-common
     <<: [*clickhouse-env, *postgres-env]
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
-      postgresql+psycopg2://${AIRFLOW_METADATA_USER:-airflow}:${AIRFLOW_METADATA_PASSWORD:-airflow_pw}@postgres:5432/${AIRFLOW_METADATA_DB:-airflow}
-    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-UKMzEm3yIuFYEq3y3-2rvZWUD_qMkFhOZ1t2Vd0kkPI=}
+      postgresql+psycopg2://${AIRFLOW_METADATA_USER:-airflow}:${AIRFLOW_METADATA_PASSWORD:-changeme_airflow}@postgres:5432/${AIRFLOW_METADATA_DB:-airflow}
+    # No default, on purpose. `:?` makes compose refuse to start with a clear
+    # message rather than silently falling back to a key that is public in
+    # this repository. Every other credential here is a visible placeholder;
+    # this one encrypts OTHER secrets, so a shared default is worse than an
+    # outage. `make env` generates one.
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?run 'make env' or set AIRFLOW_FERNET_KEY - see .env.example}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__PARALLELISM: "8"
@@ -119,15 +124,15 @@ services:
       - "max_connections=200"
     environment:
       POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-postgres_pw}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-changeme_superuser}
       POSTGRES_DB: ${POSTGRES_DB:-crypto}
       APP_USER: ${POSTGRES_USER:-crypto_app}
-      APP_PASSWORD: ${POSTGRES_PASSWORD:-crypto_app_pw}
+      APP_PASSWORD: ${POSTGRES_PASSWORD:-changeme_app}
       DBZ_USER: ${DEBEZIUM_USER:-debezium}
-      DBZ_PASSWORD: ${DEBEZIUM_PASSWORD:-debezium_pw}
+      DBZ_PASSWORD: ${DEBEZIUM_PASSWORD:-changeme_debezium}
       AIRFLOW_METADATA_DB: ${AIRFLOW_METADATA_DB:-airflow}
       AIRFLOW_METADATA_USER: ${AIRFLOW_METADATA_USER:-airflow}
-      AIRFLOW_METADATA_PASSWORD: ${AIRFLOW_METADATA_PASSWORD:-airflow_pw}
+      AIRFLOW_METADATA_PASSWORD: ${AIRFLOW_METADATA_PASSWORD:-changeme_airflow}
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./infra/postgres:/docker-entrypoint-initdb.d:ro
@@ -239,7 +244,7 @@ services:
     environment:
       <<: *postgres-env
       DEBEZIUM_USER: ${DEBEZIUM_USER:-debezium}
-      DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD:-debezium_pw}
+      DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD:-changeme_debezium}
       CDC_TOPIC_PREFIX: ${CDC_TOPIC_PREFIX:-cdc}
       KAFKA_CONNECT_URL: http://connect:8083
       CONNECTOR_TEMPLATE: /opt/connect/debezium-postgres.json
@@ -266,7 +271,7 @@ services:
       # WRITABLE - mounting it read-only silently breaks account creation and
       # every later query fails with AUTHENTICATION_FAILED.
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_pw}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-changeme_clickhouse}
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
     ulimits:
       # ClickHouse opens a file per column per part. The Docker default of 1024
@@ -411,7 +416,7 @@ services:
       # Connects as the application role, which was granted pg_monitor by the
       # init script. A superuser connection would work too and is exactly the
       # shortcut that ends up in production.
-      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-crypto_app}:${POSTGRES_PASSWORD:-crypto_app_pw}@postgres:5432/${POSTGRES_DB:-crypto}?sslmode=disable"
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-crypto_app}:${POSTGRES_PASSWORD:-changeme_app}@postgres:5432/${POSTGRES_DB:-crypto}?sslmode=disable"
       PG_EXPORTER_AUTO_DISCOVER_DATABASES: "false"
     networks: [pipeline]
 
@@ -467,7 +472,7 @@ services:
       prometheus: {condition: service_healthy}
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme_admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
@@ -475,7 +480,7 @@ services:
       # in this repo still works - they are all built on Prometheus.
       GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_pw}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-changeme_clickhouse}
     volumes:
       - grafana-data:/var/lib/grafana
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro

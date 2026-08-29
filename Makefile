@@ -24,8 +24,14 @@ help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
-env:  ## Create .env from the template if it does not exist
-	@if [ ! -f .env ]; then cp .env.example .env && echo "created .env from .env.example"; \
+env:  ## Create .env from the template, generating a unique Fernet key
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
+		key=$$(openssl rand -base64 32 | tr '+/' '-_'); \
+		sed -i.bak "s|^AIRFLOW_FERNET_KEY=.*|AIRFLOW_FERNET_KEY=$$key|" .env && rm -f .env.bak; \
+		echo "created .env with a freshly generated AIRFLOW_FERNET_KEY"; \
+		echo "NOTE: passwords are still the changeme_* placeholders - fine locally,"; \
+		echo "      replace them before deploying anywhere reachable."; \
 	else echo ".env already exists, leaving it alone"; fi
 
 up: env  ## Start the whole stack (the one command a reviewer needs)
@@ -116,4 +122,4 @@ psql:  ## Open a psql shell on the OLTP database
 
 clickhouse-client:  ## Open a ClickHouse client
 	$(COMPOSE) exec clickhouse clickhouse-client \
-		--user $${CLICKHOUSE_USER:-analytics} --password $${CLICKHOUSE_PASSWORD:-analytics_pw}
+		--user $${CLICKHOUSE_USER:-analytics} --password $${CLICKHOUSE_PASSWORD:-changeme_clickhouse}

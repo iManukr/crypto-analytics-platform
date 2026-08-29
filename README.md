@@ -221,7 +221,7 @@ manually:
 ### Stage 1: the REST API reached PostgreSQL
 
 ```bash
-docker compose exec postgres psql -U crypto_app -d crypto -c "
+docker compose exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
   select symbol,
          count(*)                       as candles,
          max(open_time)                 as newest,
@@ -251,7 +251,7 @@ docker compose exec kafka kafka-console-consumer \
 ### Stage 3: CDC replicated into ClickHouse
 
 ```bash
-curl -s -u analytics:analytics_pw http://localhost:8123/ --data-binary "
+curl -s -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" http://localhost:8123/ --data-binary "
   select count()                                                  as rows,
          max(open_time)                                            as newest,
          round(avg((toUnixTimestamp64Milli(_cdc_arrived_at)
@@ -270,14 +270,14 @@ The dead-letter table should have nothing in it: a single row there means
 some change event never made it into the warehouse:
 
 ```bash
-curl -s -u analytics:analytics_pw http://localhost:8123/ \
+curl -s -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" http://localhost:8123/ \
   --data-binary "SELECT count() FROM raw.cdc_dead_letters"
 ```
 
 ### Stage 4: dbt built the staging and mart layers
 
 ```bash
-curl -s -u analytics:analytics_pw http://localhost:8123/ --data-binary "
+curl -s -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" http://localhost:8123/ --data-binary "
   SELECT 'stg_market_candles' AS model, count() AS rows FROM analytics_staging.stg_market_candles
   UNION ALL SELECT 'fct_candles_1m',   count() FROM analytics_marts.fct_candles_1m
   UNION ALL SELECT 'agg_candles_5m',   count() FROM analytics_marts.agg_candles_5m
@@ -302,13 +302,13 @@ watching for it to show up in ClickHouse:
 
 ```bash
 # Flip a value in the OLTP database
-docker compose exec postgres psql -U crypto_app -d crypto -c \
+docker compose exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
   "UPDATE crypto.symbols SET display_name = 'CDC PROOF' WHERE symbol = 'ETHUSDT';"
 
 # Within a second or two, ClickHouse has the new value - and FINAL collapses
 # the old version away rather than leaving two rows
 sleep 3
-curl -s -u analytics:analytics_pw http://localhost:8123/ --data-binary \
+curl -s -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" http://localhost:8123/ --data-binary \
   "SELECT symbol, display_name, _op, _lsn FROM raw.symbols FINAL FORMAT PrettyCompact"
 ```
 
@@ -324,24 +324,31 @@ consumer-lag monitoring simply can't see.
 
 | Service | URL | Credentials |
 |---|---|---|
-| **Airflow** | http://localhost:8080 | `admin` / `admin` |
-| **Grafana** | http://localhost:3000 | `admin` / `admin` (anonymous viewing enabled) |
+| **Airflow** | http://localhost:8080 | `$AIRFLOW_ADMIN_USER` / `$AIRFLOW_ADMIN_PASSWORD` |
+| **Grafana** | http://localhost:3000 | `$GRAFANA_ADMIN_USER` / `$GRAFANA_ADMIN_PASSWORD` (anonymous viewing enabled) |
 | **Prometheus** | http://localhost:9090 | none |
-| **ClickHouse** (HTTP + query UI) | http://localhost:8123/play | `analytics` / `analytics_pw` |
-| **PostgreSQL** | `localhost:5432` | `crypto_app` / `crypto_app_pw`, database `crypto` |
+| **ClickHouse** (HTTP + query UI) | http://localhost:8123/play | `$CLICKHOUSE_USER` / `$CLICKHOUSE_PASSWORD` |
+| **PostgreSQL** | `localhost:5432` | `$POSTGRES_USER` / `$POSTGRES_PASSWORD`, database `$POSTGRES_DB` |
 | **Kafka** | `localhost:9092` | none (PLAINTEXT) |
 | **Kafka Connect REST** | http://localhost:8083/connectors | none |
 | **Ingestion metrics** | http://localhost:8000/metrics | none |
 | **Pipeline/DQ exporter** | http://localhost:9101/metrics | none |
 
-Every port can be reconfigured in `.env`, in case one of them collides with
-something already running on your machine.
+Credentials are named by variable rather than value, so this file never has to
+be kept in sync with a password. Every port can be reconfigured in `.env` too,
+in case one collides with something already running on your machine.
+
+Load the variables once and every command below is copy-pasteable:
+
+```bash
+cd ~/crypto-analytics-platform && set -a && source .env && set +a
+```
 
 **Shell access:**
 
 ```bash
-docker compose exec postgres psql -U crypto_app -d crypto
-docker compose exec clickhouse clickhouse-client --user analytics --password analytics_pw
+docker compose exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+docker compose exec clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD"
 docker compose exec airflow-scheduler bash
 ```
 
@@ -420,6 +427,29 @@ failing outright, since a badge that's permanently red just trains people
 to stop looking at it.
 
 ---
+
+## Security posture
+
+Every password in `.env.example` is a `changeme_*` placeholder, committed on
+purpose so the stack starts with one command. They bind only to localhost and
+the Docker network, so on a laptop they grant nothing to anyone. No real
+credential, certificate or key has ever been committed to this repository.
+
+`AIRFLOW_FERNET_KEY` is treated differently and ships **empty**. Airflow uses it
+to encrypt stored connection credentials, so a key committed to version control
+is pre-compromised: anyone with the repository could decrypt every connection
+the deployment holds. `make env` generates a unique one, and the stack refuses
+to start without it rather than starting insecure.
+
+Before running this anywhere reachable from outside your machine:
+
+1. Replace every `changeme_*` value in `.env`.
+2. Generate a fresh `AIRFLOW_FERNET_KEY` - `make env` on a clean checkout, or
+   `openssl rand -base64 32 | tr '+/' '-_'`.
+3. Turn off Grafana anonymous access (`GF_AUTH_ANONYMOUS_ENABLED`), which is
+   enabled here for convenience.
+4. Stop publishing the database and broker ports to the host; only the UIs need
+   to be reachable.
 
 ## Repository layout
 
