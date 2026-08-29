@@ -10,5 +10,5 @@
 psycopg2-binary
 requests==2.32.3
 prometheus-client==0.21.1
-clickhouse-connect==0.8.11
+clickhouse-connect==1.7.2
 apache-airflow-providers-http
