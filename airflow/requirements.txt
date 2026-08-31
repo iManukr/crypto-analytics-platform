@@ -8,7 +8,7 @@
 # the scheduler, at the cost of invoking dbt as a subprocess - which is what
 # the BashOperator does anyway.
 psycopg2-binary
-requests==2.32.3
-prometheus-client==0.21.1
+requests==2.34.2
+prometheus-client==0.26.0
 clickhouse-connect==0.8.11
 apache-airflow-providers-http
