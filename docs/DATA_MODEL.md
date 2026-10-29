@@ -125,7 +125,7 @@ erDiagram
     }
 ```
 
-Three tables are captured by CDC; `ingest_rejects` deliberately is not — it is
+Three tables are captured by CDC; `ingest_rejects` deliberately is not; it is
 operational state, and replicating malformed payloads into the warehouse would
 be actively unhelpful.
 
@@ -140,7 +140,7 @@ pipeline that only ever sees INSERTs has not been tested:
 
 `fx_rates` is keyed on `(base, quote)` with no `as_of` in the key, so every
 refresh is a genuine in-place UPDATE. That is what makes it the proof that
-dedup-by-version actually works — with only INSERTs, a broken version column
+dedup-by-version actually works, with only INSERTs, a broken version column
 would look perfectly fine.
 
 `REPLICA IDENTITY FULL` on all three puts the complete old row into the WAL for
@@ -165,7 +165,7 @@ Source columns plus CDC metadata:
 | Column | Meaning |
 |---|---|
 | `_op` | `c` create, `u` update, `d` delete, `r` snapshot read |
-| `_lsn` | Postgres log sequence number — **the dedup version** |
+| `_lsn` | Postgres log sequence number: **the dedup version** |
 | `_source_ts_ms` | Postgres commit time, epoch ms |
 | `_kafka_partition`, `_kafka_offset` | Provenance back to the exact message |
 | `_cdc_arrived_at` | `now64(3)` when ClickHouse materialised the row |
@@ -175,7 +175,7 @@ latency**, measured from the data rather than inferred from queue depth. That
 distinction matters: Kafka consumer lag can read zero while the data is hours
 stale, because a dead connector produces nothing to lag on.
 
-### `raw.fx_rates` — a deliberate semantic change
+### `raw.fx_rates`: a deliberate semantic change
 
 ```sql
 ENGINE = ReplacingMergeTree(_lsn)
@@ -187,11 +187,11 @@ means ClickHouse keeps **one row per published rate**, so the warehouse
 accumulates the history the OLTP store discards, while dedup still collapses
 replayed events within a single `as_of`.
 
-Without this, `fct_candles_1m` could only reprice history at today's rate — and
+Without this, `fct_candles_1m` could only reprice history at today's rate, and
 every historical KES figure would silently change every day. That class of bug
 is very hard to notice and very hard to explain afterwards.
 
-### `raw.candles_5m_rt` — the fast, approximate rollup
+### `raw.candles_5m_rt`: the fast, approximate rollup
 
 An `AggregatingMergeTree` fed by a materialized view chained off
 `raw.market_candles_1m`, so a 5-minute bucket updates within about a second of
@@ -199,11 +199,11 @@ the underlying minute landing, with no orchestrator involved.
 
 > **Read this before trusting its volume column.** Debezium is at-least-once. On
 > a connector restart the same minute can be inserted twice. `argMin`/`argMax`/
-> `max`/`min` states are idempotent under replay; **`sumState` is not** —
+> `max`/`min` states are idempotent under replay; **`sumState` is not**:
 > replayed rows double-count volume and trade count.
 >
 > This is why the object is positioned as the *fast, approximate* serving layer
-> and `analytics_marts.agg_candles_5m` — which deduplicates before aggregating —
+> and `analytics_marts.agg_candles_5m`, which deduplicates before aggregating,
 > is authoritative. Dashboards needing the last few seconds read this one;
 > anything that has to reconcile reads the mart. The Grafana panel titles say
 > which is which.
@@ -227,7 +227,7 @@ that can be stale.
 | `stg_fx_rates` | `FINAL` dedup, drop tombstones and non-positive rates |
 
 Deletes are treated differently on purpose: a deleted *candle* is noise and gets
-filtered, but a deleted *symbol* is information — it should stop appearing in
+filtered, but a deleted *symbol* is information; it should stop appearing in
 new facts while its history stays joinable.
 
 The `FINAL` cost is paid here exactly once so no downstream model has to
@@ -238,7 +238,7 @@ remember to. It is bounded by `do_not_merge_across_partitions_select_final = 1`
 
 ## 5. Mart layer
 
-### `fct_candles_1m` — the canonical fact
+### `fct_candles_1m`: the canonical fact
 
 ```sql
 ENGINE = MergeTree()
@@ -260,14 +260,14 @@ asof left join fx as f
 one pass, no correlated subquery. A plain join to "the latest rate" would
 retroactively reprice all of history every time the rate moved.
 
-### `agg_candles_5m` — the authoritative rollup
+### `agg_candles_5m`: the authoritative rollup
 
 `argMin(open_price, open_time)` and `argMax(close_price, open_time)`, not
 `min`/`max` of price. That distinction is the whole point of an OHLC bar: the
 "open" is the price at the earliest minute, not the smallest price in the
 window. Carries `minutes_covered` and `is_complete`.
 
-### `fct_market_daily` — reporting
+### `fct_market_daily`: reporting
 
 Built from `agg_candles_5m` rather than the 1-minute fact: one fifth of the rows
 for an identical result on min/max/sum. Adds realised volatility via Parkinson's
@@ -277,25 +277,25 @@ whole day's aggregate.
 
 ### `dim_symbol`
 
-Full-refresh table — it holds a handful of rows, so incremental logic would be
+Full-refresh table; it holds a handful of rows, so incremental logic would be
 pure risk. No `PARTITION BY`: partitions on a ten-row table are metadata
 overhead and nothing else. Carries activity statistics and an `is_stale` flag
-(active upstream but no candle in the last hour — a broken ingestion path, not
+(active upstream but no candle in the last hour, a broken ingestion path, not
 an inactive pair).
 
 ---
 
 ## 6. ClickHouse design decisions, and why
 
-### `ORDER BY (symbol, open_time)` — symbol first
+### `ORDER BY (symbol, open_time)`: symbol first
 
 ClickHouse's primary index is sparse and built from the ORDER BY prefix. Every
-real query filters by symbol and then by time range — a chart, a backtest, a
+real query filters by symbol and then by time range, a chart, a backtest, a
 feature build all do. Symbol first lets the index prune to one symbol's granules
 immediately, and the time predicate prunes within it. Reversed, every symbol's
 data would be scanned for any time range.
 
-### `PARTITION BY toYYYYMM(open_time)` — monthly, not daily
+### `PARTITION BY toYYYYMM(open_time)`: monthly, not daily
 
 Partitions are a **pruning and lifecycle unit, not an index**. Daily partitions
 would create a metadata part per partition per insert and push the table toward
@@ -309,7 +309,7 @@ policy drop a whole month atomically.
 Raw needs dedup because Debezium is at-least-once. Marts do not: staging already
 deduplicated, so `ReplacingMergeTree` there would pay merge-time dedup cost on
 data with no duplicates. Mart uniqueness is instead enforced by the
-`delete+insert` incremental strategy plus a `unique_combination` dbt test —
+`delete+insert` incremental strategy plus a `unique_combination` dbt test,
 which **fails loudly** rather than silently collapsing rows.
 
 ### `_lsn` as the version column
@@ -322,7 +322,7 @@ sub-millisecond changes; a row-arrival counter would not survive a replay.
 ### `do_not_merge_across_partitions_select_final = 1`
 
 `FINAL` is on the hot path for every staging view, and it is expensive. This
-setting confines the merge to one partition at a time — the single biggest
+setting confines the merge to one partition at a time, the single biggest
 performance lever available here. It is safe because the dedup key never spans a
 partition boundary: the partition expression is derived from `open_time`, which
 is itself part of the ORDER BY.
@@ -385,13 +385,13 @@ model that 23:59 and 00:00 are maximally distant.
 | Flag | Why |
 |---|---|
 | `is_label_resolved = 1` | The most recent minute has no "next minute" yet; its labels are placeholder zeros. Training on those teaches the model from a fabricated label. |
-| `has_contiguous_history = 1` | A return computed across an ingestion gap is not a 1-minute return — it is an artefact of our uptime. |
+| `has_contiguous_history = 1` | A return computed across an ingestion gap is not a 1-minute return; it is an artefact of our uptime. |
 | `is_synthetic = 0` | Excludes rows from the offline replay generator. |
 
 Two tests enforce this. The singular test
 `assert_unresolved_labels_are_neutral` fails if any unresolved row carries a
 non-zero label. The integration test recomputes `sma_5` from raw closes and
-compares — a frame that included the next row would produce a different number,
+compares, a frame that included the next row would produce a different number,
 so this proves the window really is backward-looking.
 
 **What this is not.** A leakage-safe dataset is not a trading signal.

@@ -1,7 +1,7 @@
 # Runbook
 
 Every alert in `infra/prometheus/alerts.yml` links here. Each entry states what
-the alert means, what it is safe to assume, and what to do — in that order,
+the alert means, what it is safe to assume, and what to do, in that order,
 because at 03:00 the ordering matters more than the content.
 
 **First move, always:**
@@ -19,9 +19,9 @@ almost always faster than reading dashboards.
 
 | Where freshness is climbing | Where the problem is |
 |---|---|
-| OLTP only | Ingestion — API or the service |
-| OLTP flat, `raw` climbing | CDC — connector, Kafka, or ClickHouse |
-| Both flat, marts climbing | Orchestration — Airflow or dbt |
+| OLTP only | Ingestion: API or the service |
+| OLTP flat, `raw` climbing | CDC: connector, Kafka, or ClickHouse |
+| Both flat, marts climbing | Orchestration: Airflow or dbt |
 
 The **Freshness by pipeline layer** panel on the Pipeline Health dashboard shows
 all three lines at once and answers this in a glance.
@@ -33,7 +33,7 @@ all three lines at once and answers this in a glance.
 **Alerts:** `DebeziumConnectorDown`, `DebeziumTaskFailed`
 
 **What it means.** No change events are reaching Kafka. Postgres keeps accepting
-writes, so this is silent data loss from the warehouse's point of view — the
+writes, so this is silent data loss from the warehouse's point of view, the
 replica falls further behind every second and nothing downstream complains,
 because everything downstream is happily processing stale data.
 
@@ -77,7 +77,7 @@ curl -X DELETE http://localhost:8083/connectors/crypto-oltp-cdc
 docker compose up -d --force-recreate connect-init
 ```
 
-**A record could not be converted.** `errors.tolerance` is deliberately `none` —
+**A record could not be converted.** `errors.tolerance` is deliberately `none`:
 skipping a CDC record corrupts the replica permanently. The trace names the
 offending record. Fix the cause, then restart the task.
 
@@ -100,7 +100,7 @@ themselves, so unlike consumer lag it cannot be fooled by a dead producer.
 ### Diagnose, in this order
 
 1. **Is it a backlog being worked through, or is it losing ground?** Watch the
-   trend. Falling means it is catching up — usually after a restart replaying
+   trend. Falling means it is catching up, usually after a restart replaying
    the snapshot, and no action is needed.
 
 2. **Kafka consumer lag** on the Platform Resources dashboard. High lag with high
@@ -123,7 +123,7 @@ themselves, so unlike consumer lag it cannot be fooled by a dead producer.
 
 Sustained lag with no backlog usually means insert batching is too aggressive.
 Raise `kafka_max_block_size` and `kafka_flush_interval_ms` on the Kafka engine
-tables — fewer, larger inserts. See [SCALING.md](SCALING.md#stage-1--tuning-no-architecture-change).
+tables, fewer, larger inserts. See [SCALING.md](SCALING.md#stage-1-tuning-no-architecture-change).
 
 ---
 
@@ -150,7 +150,7 @@ holds the full payload, so the actual shape is right there.
 ### Fix
 
 1. Update the materialized view in `infra/clickhouse/init/04-materialized-views.sql`.
-2. Recreate it (`DROP VIEW` + `CREATE MATERIALIZED VIEW`) — this does **not**
+2. Recreate it (`DROP VIEW` + `CREATE MATERIALIZED VIEW`); this does **not**
    touch the landing table.
 3. Replay the affected offsets by detaching and re-attaching the Kafka table with
    an earlier offset, or accept the gap and backfill from Postgres.
@@ -165,8 +165,8 @@ holds the full payload, so the actual shape is right there.
 **What it means.** The OLTP source and the OLAP replica disagree on row count in
 a settled window. **The sign is the diagnosis:**
 
-- **Positive** (Postgres has more) — change events were **lost**. Serious.
-- **Negative** (ClickHouse has more) — duplicate events a merge has not yet
+- **Positive** (Postgres has more): change events were **lost**. Serious.
+- **Negative** (ClickHouse has more): duplicate events a merge has not yet
   collapsed. Usually benign.
 
 The comparison window already excludes the last two minutes, so this is not
@@ -189,7 +189,7 @@ SELECT count() AS raw_rows,
 FROM raw.market_candles_1m;
 ```
 
-If `deduped` matches Postgres, there is nothing wrong — force a merge if desired:
+If `deduped` matches Postgres, there is nothing wrong; force a merge if desired:
 
 ```sql
 OPTIMIZE TABLE raw.market_candles_1m FINAL;
@@ -222,7 +222,7 @@ rows generate events.
 
 **What it means.** Postgres is retaining WAL a slot has not confirmed. If it
 keeps climbing, **the source database fills its disk and stops accepting
-writes** — a monitoring component causing a production outage.
+writes**, a monitoring component causing a production outage.
 
 ### Diagnose
 
@@ -244,7 +244,7 @@ quiet captured table means the slot never advances even while the rest of the
 database is busy.
 
 **If disk pressure is imminent and CDC cannot be restored quickly**, drop the
-slot to protect the database. This forces a re-snapshot later — an acceptable
+slot to protect the database. This forces a re-snapshot later, an acceptable
 price for keeping the source alive:
 
 ```sql
@@ -261,7 +261,7 @@ diagnosis.
 **Alerts:** `IngestionDown`, `IngestionStalled`, `DataFreshnessBreached`,
 `IngestionErrorRateHigh`
 
-**What it means.** `IngestionStalled` fires on *work completed*, not liveness —
+**What it means.** `IngestionStalled` fires on *work completed*, not liveness,
 so it catches the case a simple up/down check misses entirely: a perfectly
 healthy container that is writing nothing.
 
@@ -288,7 +288,7 @@ Data produced this way is synthetic, stamped `source='replay'` and flagged
 `is_synthetic` in the marts.
 
 **Rate limited (429).** The service honours `Retry-After`. Sustained 429s mean
-too many symbols for the interval — raise `INGEST_INTERVAL_SECONDS` or reduce
+too many symbols for the interval, raise `INGEST_INTERVAL_SECONDS` or reduce
 `SYMBOLS`.
 
 **Postgres unreachable.** `ingest_errors_total{kind="database"}` climbing.
@@ -306,7 +306,7 @@ stamped `source = 'replay'` and surfaces as `dq_synthetic_source` /
 `is_synthetic` downstream.
 
 This alert exists because degradation must be as loud as failure. A dashboard
-still drawing a line is worse than an empty one — nobody investigates a chart
+still drawing a line is worse than an empty one: nobody investigates a chart
 that looks fine.
 
 ### Do
@@ -329,7 +329,7 @@ that looks fine.
 **Alert:** `IngestRejectsGrowing`
 
 **What it means.** Rows are failing the ingest-time validation gate. This is the
-system working — bad data is being stopped before it enters the pipeline — but a
+system working, bad data is being stopped before it enters the pipeline, but a
 rising rate means something upstream changed.
 
 ### Diagnose
@@ -393,7 +393,7 @@ make dbt-build
 **Alert:** `DbtTestsFailing`
 
 **What it means.** A data-quality assertion failed. Tests run at
-`severity: error`, so the DAG has already stopped — the marts are stale but not
+`severity: error`, so the DAG has already stopped: the marts are stale but not
 wrong.
 
 ### Diagnose
@@ -418,12 +418,12 @@ ORDER BY invocation_at DESC LIMIT 20;
 
 | Test | What it means |
 |---|---|
-| `unique_combination` on a fact | The `delete+insert` did not deduplicate — a real incremental bug |
+| `unique_combination` on a fact | The `delete+insert` did not deduplicate: a real incremental bug |
 | `ohlc_consistent` | The source produced an impossible bar, or a cast is wrong |
-| `no_future_timestamps` | A clock is wrong. Fix urgently — it disables the freshness alert |
+| `no_future_timestamps` | A clock is wrong. Fix urgently: it disables the freshness alert |
 | `not_empty` | A model built successfully but is empty. Check the incremental filter |
 | `assert_mart_reconciles_with_staging` | An incremental run skipped a window |
-| `assert_rollup_reconciles` | The 5-minute rollup disagrees with the 1-minute fact — check for double-counted replays |
+| `assert_rollup_reconciles` | The 5-minute rollup disagrees with the 1-minute fact; check for double-counted replays |
 | `series_coverage` (warn) | Ingestion gaps. Normal in small numbers |
 
 ---
@@ -477,13 +477,13 @@ SELECT * FROM system.kafka_consumers FORMAT Vertical;
 ```
 
 `last_exception` there is usually the answer. Also check
-[clickhouse-too-many-parts](#clickhouse-too-many-parts) — insert back-pressure is
+[clickhouse-too-many-parts](#clickhouse-too-many-parts): insert back-pressure is
 the most common cause.
 
 ### Fix
 
 At this scale a single partition is the ceiling. See
-[SCALING.md](SCALING.md#2-single-kafka-partition--the-throughput-ceiling).
+[SCALING.md](SCALING.md#2-single-kafka-partition-the-throughput-ceiling).
 
 ---
 
@@ -491,8 +491,8 @@ At this scale a single partition is the ceiling. See
 
 **Alerts:** `AirflowDagFailing`, `AirflowSchedulerHeartbeatMissing`
 
-**What it means.** Orchestration has stopped. The streaming path continues — CDC
-keeps replicating into the raw layer — so this degrades the marts, not the raw
+**What it means.** Orchestration has stopped. The streaming path continues: CDC
+keeps replicating into the raw layer, so this degrades the marts, not the raw
 data.
 
 ### Diagnose
@@ -542,7 +542,7 @@ curl -s http://localhost:9101/metrics | grep exporter_target_up
 ### Fix
 
 Confirm the underlying system is genuinely healthy using its own interface
-before assuming the pipeline is fine — then restart the exporter:
+before assuming the pipeline is fine, then restart the exporter:
 
 ```bash
 docker compose restart exporter

@@ -20,18 +20,18 @@ first several orders of magnitude need almost no change at all.
 |---|---|---|
 | Today: 2 symbols, 1m | 2.9 K | Trivially handled |
 | 100 symbols, 1m | 144 K | No change needed |
-| 500 symbols, 1m | 720 K | Tuning only ([Stage 1](#stage-1--tuning-no-architecture-change)) |
-| 500 symbols + trades | ~50 M | Architecture changes ([Stage 2](#stage-2--horizontal-scale)) |
-| Multi-exchange, tick | 1 B+ | Rearchitecture ([Stage 3](#stage-3--rearchitecture)) |
+| 500 symbols, 1m | 720 K | Tuning only ([Stage 1](#stage-1-tuning-no-architecture-change)) |
+| 500 symbols + trades | ~50 M | Architecture changes ([Stage 2](#stage-2-horizontal-scale)) |
+| Multi-exchange, tick | 1 B+ | Rearchitecture ([Stage 3](#stage-3-rearchitecture)) |
 
 ---
 
 ## What breaks first, in order
 
-Knowing the *order* matters more than knowing the list — it says where to spend
+Knowing the *order* matters more than knowing the list; it says where to spend
 effort.
 
-### 1. ClickHouse "too many parts" — the first cliff
+### 1. ClickHouse "too many parts": the first cliff
 
 **Symptom:** `clickhouse_table_parts` climbs steadily, then inserts are rejected
 outright at `parts_to_throw_insert` (3000).
@@ -39,7 +39,7 @@ outright at `parts_to_throw_insert` (3000).
 This is the failure that arrives without warning: everything is fine, then
 writes stop. Every insert creates a part; background merges collapse them. More
 symbols means more Kafka messages, which at a fixed `kafka_flush_interval_ms`
-means *more, smaller* inserts — exactly the wrong direction.
+means *more, smaller* inserts, exactly the wrong direction.
 
 **Fix, in order of preference:**
 
@@ -51,7 +51,7 @@ means *more, smaller* inserts — exactly the wrong direction.
 
 Already alerted on (`ClickHouseTooManyParts` at 300, well below the cliff).
 
-### 2. Single Kafka partition — the throughput ceiling
+### 2. Single Kafka partition: the throughput ceiling
 
 **Symptom:** `kafka_consumergroup_lag` climbs and never recovers.
 
@@ -62,7 +62,7 @@ Consumption cannot be parallelised at all.
 key, so ordering per key is preserved), raise `topic.creation.default.partitions`,
 and set `kafka_num_consumers` on the ClickHouse Kafka tables to match. Ordering
 guarantees are per-partition, and because the key is the primary key, per-key
-ordering — the only ordering CDC actually needs — survives.
+ordering, the only ordering CDC actually needs, survives.
 
 ### 3. Postgres WAL volume from `REPLICA IDENTITY FULL`
 
@@ -75,8 +75,8 @@ before-image that makes tombstones usable.
 **Fix:** move the high-volume tables to `REPLICA IDENTITY DEFAULT` (primary key
 only) and handle deletes by key alone in ClickHouse. Keep `FULL` on the
 low-volume dimension tables where the before-image is genuinely useful and the
-cost is nothing. This is a real trade — the audit value of the before-image is
-lost — and it should be made deliberately, not by default.
+cost is nothing. This is a real trade: the audit value of the before-image is
+lost, and it should be made deliberately, not by default.
 
 ### 4. `FINAL` in the staging views
 
@@ -100,7 +100,7 @@ aggregation path; or materialise staging as an incremental table.
 
 ---
 
-## Stage 1 — Tuning (no architecture change)
+## Stage 1: Tuning (no architecture change)
 
 **Up to roughly 1 M rows/day.** Everything stays single-node.
 
@@ -119,7 +119,7 @@ configuration.
 
 ---
 
-## Stage 2 — Horizontal scale
+## Stage 2: Horizontal scale
 
 **Roughly 1 M – 100 M rows/day.** Components become clustered.
 
@@ -142,7 +142,7 @@ SQL does not change.**
 
 Three brokers, `replication.factor=3`, `min.insync.replicas=2`. Topic partitions
 sized to peak throughput divided by per-consumer capacity. Retention driven by
-recovery objective — long enough to rebuild ClickHouse from Kafka without a
+recovery objective, long enough to rebuild ClickHouse from Kafka without a
 Postgres re-snapshot.
 
 ### Debezium: connector per table group
@@ -158,19 +158,19 @@ Now worth it. JSON costs roughly 3× the bytes, and at this volume that is real
 network and disk. Confluent Schema Registry plus `AvroConverter` on the
 connector; ClickHouse Kafka tables switch to `kafka_format = 'AvroConfluent'`.
 
-**This is deliberately a small change** — a converter swap and a format setting
-on three tables — which is precisely why the current design reads the envelope
+**This is deliberately a small change**: a converter swap and a format setting
+on three tables, which is precisely why the current design reads the envelope
 as an opaque string rather than depending on Debezium's SMT layer.
 
 ### Postgres: read replica and partitioning
 
 Partition `market_candles_1m` by range on `open_time` (monthly) so old partitions
-detach cheaply. Note that logical replication must still read from the primary —
+detach cheaply. Note that logical replication must still read from the primary:
 a read replica offloads analytics queries, not CDC.
 
 ---
 
-## Stage 3 — Rearchitecture
+## Stage 3: Rearchitecture
 
 **100 M+ rows/day, or tick-level, or multi-region.** The current shape stops
 being the right one.
@@ -198,7 +198,7 @@ one expensive ad-hoc query cannot back up CDC consumption.
 
 | Stage | Volume | Effort | Nature of the work |
 |---|---|---|---|
-| Current | < 100 K/day | — | — |
+| Current | < 100 K/day | - | - |
 | Stage 1 | < 1 M/day | ~1 day | Config, plus threading the ingester |
 | Stage 2 | < 100 M/day | ~2 weeks | Clustering, Avro. Model SQL unchanged. |
 | Stage 3 | 100 M+/day | ~2 months | Lakehouse, stream processing, tiering |
@@ -221,14 +221,14 @@ Roughly in order of value per unit of effort.
 2. **Loki for log aggregation.** Logs are already structured JSON. Closes the
    largest gap in [OBSERVABILITY.md](OBSERVABILITY.md).
 3. **A second data source.** The source registry in `ingestion/sources/` was
-   built for exactly this — a new adapter plus a registry entry, no changes to
+   built for exactly this, a new adapter plus a registry entry, no changes to
    the service loop, the DAG or the models.
 4. **Backfill from Binance's historical archive.** Would give the ML mart years
    of contiguous history instead of hours, which is the single biggest limitation
    of that dataset today.
 5. **A model serving loop.** Score `ml_features_1m`, write predictions to a
    `fct_predictions` table, resolve them against actual outcomes, and track
-   rolling accuracy against a majority-class baseline — including honestly
+   rolling accuracy against a majority-class baseline, including honestly
    reporting when there is no edge.
 6. **Data contracts on the sources.** dbt model contracts plus
    `on_schema_change: fail` for the mart layer, so an upstream schema change

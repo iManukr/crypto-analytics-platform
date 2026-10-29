@@ -98,7 +98,7 @@ flowchart TB
 ### The two paths, and why there are two
 
 The single most important structural decision here is that data reaches the
-warehouse by **two independent routes**, and they are not redundant — they solve
+warehouse by **two independent routes**, and they are not redundant; they solve
 different problems.
 
 | | Streaming path | Orchestrated path |
@@ -124,7 +124,7 @@ in seconds.
 
 ## 2. Data flow
 
-### Stage 1 — External API into PostgreSQL
+### Stage 1: External API into PostgreSQL
 
 The ingestion service polls Binance's `/api/v3/klines` endpoint for closed
 1-minute OHLCV bars. Three behaviours make this more than a poll loop:
@@ -135,7 +135,7 @@ The ingestion service polls Binance's `/api/v3/klines` endpoint for closed
   offset to reset.
 - **Only closed bars are ingested.** A bar for minute *m* is complete only once
   *m+1* has begun. Ingesting the in-flight minute produces a row whose volume
-  changes after it has been written — a silent correctness bug that surfaces
+  changes after it has been written, a silent correctness bug that surfaces
   weeks later as an unreproducible number.
 - **Validation is a gate, not a report.** Every row passes fifteen invariant
   checks before it can be written (`ingestion/models.py`). Failures go to
@@ -144,11 +144,11 @@ The ingestion service polls Binance's `/api/v3/klines` endpoint for closed
 
 Writes are idempotent upserts on `(symbol, open_time)`. The `ON CONFLICT` clause
 carries a `WHERE ... IS DISTINCT FROM` guard, so an unchanged re-send produces
-**no WAL record at all** — which means no CDC event, which means a 180-minute
+**no WAL record at all**, which means no CDC event, which means a 180-minute
 backfill replay does not flood Kafka with no-op updates. This is the cheapest
 optimisation in the pipeline and it lives in one clause.
 
-### Stage 2 — PostgreSQL into Kafka via Debezium
+### Stage 2: PostgreSQL into Kafka via Debezium
 
 Postgres runs with `wal_level=logical`. A publication (`dbz_publication`) is
 created by the database init script rather than autocreated by the connector,
@@ -161,18 +161,18 @@ Two connector settings carry most of the operational weight:
 **`heartbeat.interval.ms = 10000`.** A replication slot's confirmed LSN only
 advances when a *captured* table changes. If the captured tables go quiet while
 the rest of the database stays busy, Postgres retains WAL indefinitely and
-eventually fills its disk — a monitoring component taking down the system it was
+eventually fills its disk, a monitoring component taking down the system it was
 only meant to observe. The heartbeat forces periodic acknowledgement. This is
 the single most common way a Debezium deployment causes an outage.
 
 **`errors.tolerance = none`.** For most connectors, tolerating errors is
 reasonable degradation. For CDC it is not: silently skipping a change event does
-not degrade the data, it *corrupts the replica* — permanently and invisibly,
+not degrade the data, it *corrupts the replica*, permanently and invisibly,
 because the missed change never comes back. Failing the task is correct. The
 `DebeziumTaskFailed` alert fires within 30 seconds and the stream resumes from
 the slot once the cause is fixed.
 
-### Stage 3 — Kafka into ClickHouse
+### Stage 3: Kafka into ClickHouse
 
 ClickHouse consumes directly with its **Kafka table engine**; there is no sink
 connector. Each Kafka table reads messages as a single `String` column
@@ -191,11 +191,11 @@ Reading the raw envelope rather than a flattened record is deliberate:
 `raw.cdc_dead_letters` instead of stalling the consumer. Any row there is a
 defect and Prometheus alerts on a non-zero count.
 
-### Stage 4 — Raw into staging and marts
+### Stage 4: Raw into staging and marts
 
 dbt builds two layers. Staging models are **views** that pay the `FINAL` dedup
 cost exactly once, drop tombstones, cast types and attach data-quality flags.
-Marts are **incremental tables** with an explicit physical design — see
+Marts are **incremental tables** with an explicit physical design, see
 [DATA_MODEL.md](DATA_MODEL.md) for engine, partitioning and ordering rationale.
 
 The Airflow DAG will not transform on top of a dead CDC pipeline: a preflight
@@ -225,8 +225,8 @@ scale none of those pay for a second process. At the volume described in
 
 Airflow costs three extra containers and a metadata database; Dagster would cost
 two and offer asset-level lineage that maps neatly onto staging→mart. Airflow
-was chosen for operational familiarity — it is what most teams inheriting this
-will already run — and because the sensor/trigger-rule semantics used here
+was chosen for operational familiarity; it is what most teams inheriting this
+will already run, and because the sensor/trigger-rule semantics used here
 (`mode="reschedule"`, `ALL_DONE` on the publisher) are well-worn.
 
 **What we give up:** asset-based lineage and built-in freshness policies, both of
@@ -237,8 +237,8 @@ which would have replaced some hand-written code in `pipeline_common.py`.
 dbt-core and Airflow have overlapping, conflicting constraints on Jinja2, click
 and protobuf. Installing dbt into `/opt/dbt-venv` and invoking it as a
 subprocess means an Airflow upgrade cannot break dbt and a dbt upgrade cannot
-break the scheduler. The alternative — a separate dbt container driven by
-`DockerOperator` — needs the Docker socket mounted into Airflow, which is a
+break the scheduler. The alternative, a separate dbt container driven by
+`DockerOperator`, needs the Docker socket mounted into Airflow, which is a
 meaningful privilege escalation for no benefit here.
 
 ### Schemaless JSON, not Avro plus Schema Registry
@@ -246,7 +246,7 @@ meaningful privilege escalation for no benefit here.
 A Schema Registry would add a service, a failure mode and a bootstrap ordering
 constraint. Because the ClickHouse side reads the envelope as a string and
 projects fields explicitly, it buys nothing at this scale. Moving to Avro is a
-converter swap plus a format change on three Kafka tables — deliberately kept a
+converter swap plus a format change on three Kafka tables, deliberately kept a
 small change rather than a rewrite.
 
 ### JSON over Kafka costs ~3× the bytes of Avro
@@ -266,7 +266,7 @@ those produces duplicates, and every layer is built to absorb them:
 | Layer | Duplicate handling |
 |---|---|
 | Postgres | Upsert on the natural key |
-| ClickHouse raw | `ReplacingMergeTree(_lsn)` — highest LSN wins |
+| ClickHouse raw | `ReplacingMergeTree(_lsn)`, highest LSN wins |
 | Staging | `FINAL` forces dedup at read time |
 | Marts | `delete+insert` on the unique key |
 
@@ -287,7 +287,7 @@ worse failure.
 
 **The bounded failure.** `max_slot_wal_keep_size=2GB` caps WAL retention. If
 Debezium stays down long enough to exceed it, Postgres invalidates the slot: CDC
-breaks loudly and needs a re-snapshot. That is a deliberate trade — a noisy,
+breaks loudly and needs a re-snapshot. That is a deliberate trade, a noisy,
 recoverable failure in the *pipeline* is strictly better than a disk-full outage
 in the *source database*.
 
@@ -298,16 +298,16 @@ in the *source database*.
 Quality is enforced at four points, deliberately, because each catches a class
 the others cannot:
 
-**1. Ingest-time validation** (`ingestion/models.py`) — the only place a bad row
+**1. Ingest-time validation** (`ingestion/models.py`): the only place a bad row
 can still be stopped cheaply. Fifteen invariants: prices positive, OHLC
 internally consistent, taker volume ≤ total volume, timestamps minute-aligned
 and not in the future. Rejects are quarantined with their payload.
 
-**2. CDC integrity** — the dead-letter table catches messages that could not be
+**2. CDC integrity**: the dead-letter table catches messages that could not be
 parsed; row-count parity between Postgres and ClickHouse catches change events
 that were silently lost. Nothing else can detect the second one.
 
-**3. dbt tests** (74 across the project) — schema tests plus seven custom generic
+**3. dbt tests** (74 across the project): schema tests plus seven custom generic
 tests (`value_between`, `unique_combination`, `no_future_timestamps`,
 `ohlc_consistent`, `not_empty`, `fresher_than`, `series_coverage`) and four
 singular tests that assert cross-layer reconciliation. All run at
@@ -315,12 +315,12 @@ singular tests that assert cross-layer reconciliation. All run at
 the offending rows are persisted for inspection.
 
 Two of those deserve specific mention. `not_empty` exists because **every other
-test passes trivially on zero rows** — a model that builds successfully and is
+test passes trivially on zero rows**, a model that builds successfully and is
 empty is a silent failure. `no_future_timestamps` exists because a single
 future-dated row pins the freshness metric at zero, so the staleness alert can
 never fire again: the monitoring fails silently and permanently.
 
-**4. Continuous monitoring** — the pipeline exporter measures freshness, CDC lag
+**4. Continuous monitoring**: the pipeline exporter measures freshness, CDC lag
 and row parity every 15 seconds. dbt tests run on a schedule; these run always.
 
 Custom generic tests are hand-written rather than pulled from `dbt_utils`
